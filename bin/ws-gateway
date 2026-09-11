@@ -68,7 +68,7 @@ status() {
   printf 'ports    : %s\n' "$(ports)"
   printf 'log      : %s\n' "$LOG_FILE"
   printf 'routes   :\n'
-  python3 -c "import json;[print('  %-14s %-6s %s' % (r.get('prefix'), r['type'], r.get('root') or r.get('upstream'))) for r in json.load(open('$WS_ROOT/services/gateway/routes.json'))['routes']]" || true
+  python3 -c "import json,signal,sys;signal.signal(signal.SIGPIPE, signal.SIG_DFL);[print('  %-14s %-6s %s' % (r.get('prefix'), r['type'], r.get('root') or r.get('upstream'))) for r in json.load(open('$WS_ROOT/services/gateway/routes.json'))['routes']]" || true
 }
 
 case "${1:-status}" in
