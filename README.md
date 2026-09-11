@@ -244,31 +244,26 @@ internet -> Cloudflare -> cloud-server NPM -> ZeroTier -> host-machine NPM -> do
 ```
 
 Verified hops (2026-09-11): Cloudflare -> cloud NPM is the public leg; the host machine is **not**
-exposed publicly (its ZeroTier address is `10.147.17.100`), and the host's NPM serves
-`novara.local.remoteblossom.com` straight through to `ws-gateway` — `curl
-https://novara.local.remoteblossom.com/` returns this workspace's hello page with a
-`CN=*.local.remoteblossom.com` certificate. **The hop between the two proxies must send
-`SNI = novara.local.remoteblossom.com`**: the host's nginx rejects a handshake for a bare IP or for
-the public name (`unrecognized_name`), and a missing SNI is exactly what surfaces as a 502 at the
-cloud proxy. It must also use `https` upstream (`http` on the host answers `301`), and the
-**forwarded `Host` header must match a `server_name` on the host's NPM**: for an unmatched Host the
-host's nginx closes the connection with **zero bytes** (no 404), which surfaces as an instant 502
-(`upstream prematurely closed connection`) at the public proxy — so the public name has to be listed
-on the host's proxy host as well, or the cloud proxy has to send the `.local.` name.
+exposed publicly (its ZeroTier address is `10.147.17.100`). The host's NPM holds **two vhosts and two
+certificates** — `novara.remoteblossom.com` with `*.remoteblossom.com` and
+`novara.local.remoteblossom.com` with `*.local.remoteblossom.com` — both forwarding to `ws-gateway`.
 
-```bash
-ws-gateway status          # pid, /healthz, listen ports, route table
-ws-gateway ensure          # start only when unhealthy (cron watchdog entry point)
-ws-gateway restart         # reload routes.json
-ws-gateway logs 50
-```
+Invariants for the proxy -> proxy hop (measured, not guessed):
 
-Add a service by editing **`services/gateway/routes.json`** (schema in `routes.example.json`):
-
-* `static` — serve a directory from the workspace:
-  `{ "prefix": "/hello", "type": "static", "root": "services/sites/hello" }`
-* `proxy` — hand a path prefix to a local port:
-  `{ "prefix": "/app", "type": "proxy", "upstream": "http://127.0.0.1:8082", "strip_prefix": true }`
+- **`https` upstream, port 443** — the host answers `301` on `:80`.
+- **SNI is mandatory and must name a vhost on the host**: nginx with no SNI gets the host's default
+  `:443` server, which runs `ssl_reject_handshake` and answers the `unrecognized_name` alert
+  (surfacing as a ~25 ms `502` at the public proxy). NPM does not send an upstream SNI by default,
+  so the cloud proxy needs exactly two advanced lines:
+  `proxy_ssl_server_name on;` and `proxy_ssl_name novara.remoteblossom.com;`
+  (`proxy_ssl_verify` defaults to off; add `proxy_ssl_verify on;` too now that the host presents a
+  publicly trusted wildcard, optionally with `proxy_ssl_trusted_certificate` + `proxy_ssl_verify_depth 2`).
+- **SNI and `Host` must land on the same vhost**: TLS picks the certificate by SNI, the HTTP layer
+  then picks the vhost by `Host` (the cloud proxy forwards `Host: $host`). A `Host` that matches
+  nothing is answered by a **zero-byte connection close**, not a 404 — also a 502.
+- Keeping the `.local.` client path intact means *adding* a vhost, never swapping the certificate on
+  the existing one: `*.remoteblossom.com` does not cover `novara.local.remoteblossom.com` (a
+  wildcard matches exactly one label), so a swapped certificate breaks every internal user.
 
 Then `ws-gateway restart` (the table is read at start-up). `/healthz` is reserved by the router,
 and both listen ports carry the same table, so NPM can forward to either one. Route matching is
