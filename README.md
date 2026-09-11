@@ -83,29 +83,25 @@ git:
   identity:   { name: "", email: "" }
   credentials:
     - { id: github, host: github.com, protocol: https, username: "", token: "", ssh_key: "" }
-llm:                 # which provider/model agents use, and how they reason
+llm:                 # which provider/model agents use, and how hard they think
   provider: deepseek
-  model: ""          # overrides api_keys.<provider>.default_model
-  request:  { temperature: null, max_tokens: null, top_p: null, timeout_s: 300, retries: 2 }
+  fallbacks: []      # optional ordered fallbacks
+  model: ""          # empty -> api_keys.<provider>.default_model
   reasoning_effort: medium                  # THE reasoning knob (see below)
+  timeout_s: 300
+  retries: 2
+  # max_tokens: 32000                       # optional cost ceiling
   extra_body: {}
 api_keys:
-  deepseek:
-    value: ""                                # the secret
+  deepseek:                                 # four fields, same for every provider
+    value: ""                               # the secret
     env: DEEPSEEK_API_KEY
     base_url: https://api.deepseek.com/v1
-    kind: openai-compatible                  # request shape
-    default_model: deepseek-flash            # used unless llm.model overrides it
-    models: [{ id: deepseek-flash }, { id: deepseek-v4-pro }]
-    reasoning_effort: medium                 # this provider's default level
-    reasoning:                               # protocol details, not a knob
-      supported: [minimal, low, medium, high]  # levels this API really honours
-      # param: reasoning_effort              # request field name (default: the same)
-      # map: { xhigh: high }                 # explicit mapping (default: snap down)
-      # disabled_body: { thinking: { type: disabled } }   # sent when effort is none/empty
-    options: {}                              # per-provider request overrides
-    extra_body: {}                           # verbatim extra JSON (escape hatch)
-  openai: { value: "", env: OPENAI_API_KEY, base_url: "", kind: openai-compatible }
+    default_model: deepseek-flash           # ids come from the endpoint, not from a list here
+  openai:     { value: "", env: OPENAI_API_KEY,    base_url: "", default_model: "" }
+  anthropic:  { value: "", env: ANTHROPIC_API_KEY, base_url: "", default_model: "", kind: anthropic }
+  gemini:     { value: "", env: GEMINI_API_KEY,    base_url: "", default_model: "", kind: gemini }
+  tavily:     { value: "", env: TAVILY_API_KEY,    base_url: "" }   # non-LLM keys need three fields
 secrets: {}          # free-form NAME: value → exported verbatim
 proxy:   { http: "", https: "", no_proxy: "" }
 ```
@@ -136,48 +132,58 @@ cannot be committed by accident.
 think" is decided; no code holds a model name.
 
 ```bash
-ws-config llm                        # provider, model, reasoning_effort, request options
+ws-config llm                        # provider, kind, model, reasoning_effort, timeout/max_tokens
 ws-config llm --effort none          # override for one query: thinking off
-ws-config llm --effort xhigh         # shows the value that will really be sent
+ws-config llm --effort xhigh         # shows the value that will really be sent (xhigh -> high)
 ws-config llm --request              # the exact chat-completions body that would be sent
-ws-config export                     # also emits LLM_PROVIDER / LLM_MODEL /
-                                     # LLM_REASONING_EFFORT / LLM_REASONING_LEVEL / LLM_TIMEOUT_S
+ws-config export                     # also emits LLM_PROVIDER / LLM_KIND / LLM_MODEL /
+                                     # LLM_REASONING_EFFORT (+ LEVEL) / LLM_TIMEOUT_S
 python -c "from wsconfig import llm_settings, build_chat_request; \
            print(build_chat_request([{'role':'user','content':'hi'}], llm_settings()))"
 python tools/llm_probe.py --quick    # live check that reasoning_effort=none really stops thinking
 ```
 
-**There is exactly one reasoning knob: `reasoning_effort`.**
+**There is exactly one reasoning knob: `llm.reasoning_effort`.**
 
 | value | effect on the wire |
 |---|---|
-| `none` / `null` / empty / key absent | thinking off - the provider's `disabled_body` is sent instead |
-| a level the provider supports (`minimal`, `low`, `medium`, `high`) | sent verbatim as `reasoning_effort` |
-| a level it does not support (`xhigh`, `ultra`, ...) | snapped down to the nearest supported level (`--effort xhigh` → `reasoning_effort=high`) |
+| `none` / `null` / empty / key absent | thinking off - the dialect's disabled body is sent instead |
+| a level the dialect has (`minimal`, `low`, `medium`, `high`) | sent verbatim as `reasoning_effort` |
+| a level it does not have (`xhigh`, `ultra`, ...) | snapped down to the nearest supported level (`--effort xhigh` → `reasoning_effort=high`) |
 | an unknown word | falls back to the weakest supported level and `ws-config validate` reports it |
 
-Precedence is *`--effort` argument → `api_keys.<provider>.reasoning_effort` →
-`llm.reasoning_effort`*. The provider block holds only protocol details
-(`supported` levels, optional `param` / `map` / `disabled_body`), so an API that
-spells it differently is a config edit, not a code change.
+Only the `--effort` argument beats the configured value. **Protocol details are not
+config**: a provider block is four fields (`value`, `env`, `base_url`,
+`default_model`) plus optional `kind` / `extra_body`, and how the knob is spelled -
+which levels exist, what "off" looks like - follows `kind` from a table in
+`tools/wsconfig.py` (`KIND_DIALECTS`, default `openai-compatible`). Model ids are
+never listed either: they come from the endpoint (`GET /v1/models`), and a wrong id
+is reported by the API itself. `temperature` / `top_p` / `max_tokens` are not
+configuration knobs any more; the first two have no place in a modern request, and
+`max_tokens` survives only as an optional global cost ceiling (`extra_body` can
+express anything else).
 
-**Verified, not assumed.** This endpoint accepts *any* unknown JSON field with
-HTTP 200 (a junk parameter returns success), so "the request was accepted" proves
-nothing. The values shipped in `config.yaml` were measured against the live API
-(`tools/llm_probe.py`, evidence in `logs/llm-probe-*.json`):
+**Verified once, then not re-measured.** This endpoint accepts *any* unknown JSON
+field with HTTP 200 (a junk parameter returns success), so "the request was
+accepted" proves nothing - but that is an argument for one cheap check, not for
+sweeping every level. `tools/llm_probe.py` runs a single off/on A/B through the real
+request builder and records whether the switch reaches the wire (evidence in
+`logs/llm-probe-*.json`); the supported vocabulary itself comes from the API's own
+error message:
 
-* effort off (`reasoning_effort: none` → `thinking.type=disabled`) → no `reasoning_content`,
-  `reasoning_tokens: null` — **proven, re-checked end to end through `build_chat_request`**
-* the levels are real and monotonic (one run each, `max_tokens=32k`): `minimal` ≈5.2k, `low` ≈6.9k,
-  `medium` ≈12.7k, `high` ≈18.4k reasoning tokens — **measured**; `xhigh`/`ultra` are not extra
-  levels here and snap to `high`. Measuring at a low `max_tokens` clips every strong level at the
-  cap, which is what makes medium and high look identical — lift the cap before comparing
+* supported levels: `minimal`, `low`, `medium`, `high` (from the endpoint's own error message);
+  `xhigh`/`ultra` do not exist here and snap to `high`
+* effort off is spelled `thinking.type=disabled` and really stops thinking - no `reasoning_content`,
+  `reasoning_tokens: null`; confirmed end to end through `build_chat_request`
 * `thinking.budget_tokens`, `enable_thinking`, `chat_template_kwargs` → accepted but **silently
-  ignored**; do not rely on them
+  ignored** on this endpoint; do not rely on them
 * model ids: `deepseek-flash`, `deepseek-v4-pro`; anything else is rejected with HTTP 400
 
-`api_keys.<provider>.reasoning.supported` is the measured list, so `ws-config validate`
-catches a level the API does not have (or an unknown word) instead of sending it and hoping.
+Per-level token counts are deliberately **not** collected: they change no configuration and cost
+money. If you do compare runs, lift `max_tokens` first, or the cap decides the result.
+
+`ws-config validate` resolves the knob through the dialect table, so a level the API does not have
+(or an unknown word) is caught instead of sent and silently ignored.
 
 ### Git over SSH (no token needed)
 

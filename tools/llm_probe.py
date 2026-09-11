@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-"""llm_probe - measure which reasoning knobs the configured endpoint really honours.
+"""llm_probe - one on/off A/B check that the reasoning knob reaches the wire.
 
-Why: several OpenAI-compatible gateways accept *any* unknown JSON field and ignore
-it (verified on this workspace's endpoint: a junk parameter returns HTTP 200), so
-"the request was accepted" proves nothing.  This script compares observable
-effects instead, for the single reasoning knob ``reasoning_effort``:
+Deliberately small: the accepted level vocabulary comes from the API's own error
+message / docs, and sweeping levels to compare token consumption is not done here
+(it changes no configuration and costs money - see the llm-endpoint-parameter-probe
+skill). What *is* worth one request pair: gateways commonly accept unknown JSON
+fields with HTTP 200 and silently drop them, so "the request succeeded" never
+proves a switch works. This script compares the observable difference instead:
 
-  * ``none``/empty  -> must send the provider's disabled body; check that no
-    ``reasoning_content`` / reasoning tokens come back at all
-  * a level         -> how many reasoning tokens are actually spent
+  * off (``reasoning_effort: none``) must send the dialect's disabled body and
+    come back with no ``reasoning_content`` / ``reasoning_tokens``
+  * on (the configured level) must come back with reasoning, using a supported level
 
-Results land in ``logs/llm-probe-<timestamp>.json``; the numbers quoted in
-``config.yaml`` for ``api_keys.<provider>.reasoning.supported`` come from here.
-
-    python tools/llm_probe.py                    # switch + every supported level (slow)
-    python tools/llm_probe.py --quick            # switch only (2 calls)
-    python tools/llm_probe.py --provider openai  # a different api_keys entry
+    python tools/llm_probe.py                 # A/B with the configured level
+    python tools/llm_probe.py --effort high   # A/B with a specific level
+    python tools/llm_probe.py --quick         # same as default (kept for verify.sh)
 """
 from __future__ import annotations
 
@@ -33,11 +32,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 from wsconfig import build_chat_request, get, llm_settings, load  # noqa: E402
 
-PROMPT = (
-    "Solve exactly and show the steps: a 3-machine job shop, jobs J1..J4 with routes "
-    "(M1 3, M2 4), (M2 2, M3 5), (M1 6, M3 1), (M3 3, M1 2) minutes. Compute the optimal "
-    "makespan by enumerating schedules, then state the best order."
-)
+PROMPT = ("How many minutes are in 3.5 hours? Answer in one short line.")
 
 
 def call(client, st, body):
@@ -51,13 +46,10 @@ def call(client, st, body):
         d = r.json()
         msg = (d.get("choices") or [{}])[0].get("message", {}) or {}
         u = d.get("usage") or {}
-        row.update(
-            model=d.get("model"),
-            reasoning_tokens=(u.get("completion_tokens_details") or {}).get("reasoning_tokens"),
-            completion_tokens=u.get("completion_tokens"),
-            reasoning_chars=len(msg.get("reasoning_content") or ""),
-            finish=(d.get("choices") or [{}])[0].get("finish_reason"),
-        )
+        row.update(model=d.get("model"),
+                   reasoning_tokens=(u.get("completion_tokens_details") or {}).get("reasoning_tokens"),
+                   reasoning_chars=len(msg.get("reasoning_content") or ""),
+                   sent_effort=body.get("reasoning_effort"))
     else:
         row["error"] = r.text[:200]
     return row
@@ -67,8 +59,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--provider", help="api_keys entry to probe (default: llm.provider)")
     ap.add_argument("--model", help="model id (default: resolved model)")
-    ap.add_argument("--quick", action="store_true", help="thinking switch only")
-    ap.add_argument("--max-tokens", type=int, default=32000)
+    ap.add_argument("--effort", help="level for the 'on' half (default: the configured one)")
+    ap.add_argument("--quick", action="store_true", help="accepted for compatibility; the default")
+    ap.add_argument("--max-tokens", type=int, default=2000)
     args = ap.parse_args()
 
     base = llm_settings(provider=args.provider, model=args.model)
@@ -76,45 +69,34 @@ def main() -> int:
         print(f"no API key for provider '{base['provider']}' "
               f"(config.yaml -> api_keys.{base['provider']}.value)")
         return 2
-    supported = list((base.get("reasoning") or {}).get("supported") or [])
-    levels = ([lv for lv in supported] or ["medium"])
-    cases = [("off (reasoning_effort=none)", "none")]
-    if not args.quick:
-        cases += [(f"effort={lv}", lv) for lv in levels]
-        if "xhigh" not in levels:
-            cases.append(("effort=xhigh (expect snap-down)", "xhigh"))
+    on_effort = args.effort or (base.get("reasoning") or {}).get("raw")
+    if not on_effort:
+        print("nothing to switch on: llm.reasoning_effort is off/empty "
+              "(set a level, or pass --effort <level>)")
+        return 2
 
     rows = []
-    with httpx.Client(timeout=600.0) as client:
-        for label, effort in cases:
+    with httpx.Client(timeout=300.0) as client:
+        for label, effort in (("off (reasoning_effort=none)", "none"), (f"on (effort={on_effort})", on_effort)):
             st = llm_settings(provider=args.provider, model=args.model, effort=effort)
             body = build_chat_request([{"role": "user", "content": PROMPT}], st)
-            body["max_tokens"] = args.max_tokens          # lift the cap, or every
-            row = {"case": label, "reasoning_effort": effort,             # "high" run is clipped
+            body["max_tokens"] = args.max_tokens
+            row = {"case": label, "reasoning_effort": effort,
                    "sent": {k: v for k, v in body.items() if k not in ("messages", "model")},
                    **call(client, st, body)}
             rows.append(row)
             print(json.dumps(row, ensure_ascii=False), flush=True)
 
-    by_level: dict[str, list] = {}
-    for row in rows:
-        if row.get("reasoning_tokens") is not None and row["case"].startswith("effort="):
-            by_level.setdefault(row["reasoning_effort"], []).append(row["reasoning_tokens"])
-    off_rows = [r for r in rows if r["case"].startswith("off")]
+    off, on = rows[0], rows[1]
     verdict = {
-        "switch_works": bool(off_rows) and off_rows[0].get("reasoning_chars") == 0
-                         and off_rows[0].get("reasoning_tokens") is None,
-        "reasoning_tokens": by_level,
+        "switch_works": off.get("http") == 200 and off.get("reasoning_chars") == 0
+                        and off.get("reasoning_tokens") is None
+                        and on.get("http") == 200,
+        "off_sent": off.get("sent"),
+        "on_sent": on.get("sent"),
+        "on_reasoning_chars": on.get("reasoning_chars"),
+        "note": "one A/B only - no level sweep (see the llm-endpoint-parameter-probe skill)",
     }
-    means = {k: sum(v) // len(v) for k, v in by_level.items()}
-    if means:
-        verdict["means"] = means
-        weak = [v for k, v in means.items() if k in ("minimal", "low")]
-        strong = [v for k, v in means.items() if k in ("medium", "high", "xhigh", "ultra")]
-        verdict["effort_works"] = bool(weak and strong and max(weak) < min(strong))
-    if not base["base_url"]:
-        verdict["note"] = "probed the provider default endpoint (base_url is empty)"
-
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     out = ROOT / "logs" / f"llm-probe-{stamp}.json"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -122,7 +104,7 @@ def main() -> int:
                               indent=2, ensure_ascii=False), encoding="utf-8")
     print("\nverdict:", json.dumps(verdict, ensure_ascii=False))
     print("evidence ->", out)
-    return 0 if verdict.get("switch_works") else 1
+    return 0 if verdict["switch_works"] else 1
 
 
 if __name__ == "__main__":

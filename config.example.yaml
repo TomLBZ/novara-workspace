@@ -77,9 +77,8 @@ git:
     # pull.rebase: "false"
 
 # --- LLM defaults ------------------------------------------------------------
-# Which provider/model this workspace's agents use, and how they reason. Every
-# field is optional; per-provider details live in the matching api_keys.<provider>
-# block further down.
+# Which provider/model this workspace's agents use, and how hard the model should
+# think. Only `provider` and `reasoning_effort` matter; the rest has defaults.
 #     ws-config llm                   # resolved settings (human readable)
 #     ws-config llm --request         # the chat-completions body that would be sent
 #     eval "$(ws-config export)"      # LLM_PROVIDER / LLM_MODEL / LLM_REASONING_* ...
@@ -87,72 +86,46 @@ git:
 llm:
   provider: deepseek              # must be a key of api_keys below
   fallbacks: []                   # e.g. [openai, anthropic] - tried in order
-  model: ""                       # overrides api_keys.<provider>.default_model
-  request:                        # merged into every chat-completions request
-    temperature: null             # null -> leave the provider default
-    max_tokens: null
-    top_p: null
-    timeout_s: 300                # seconds per request
-    retries: 2
-  reasoning_effort: medium        # THE reasoning knob - nothing else to set
-                                  #   none | null | ""   -> thinking/reasoning OFF
-                                  #   minimal|low|medium|high|xhigh|ultra|...  -> a supported
-                                  #   level of the provider (unsupported ones snap down to the
-                                  #   nearest supported level; api_keys.<p>.reasoning lists them)
+  model: ""                       # empty -> api_keys.<provider>.default_model
+  reasoning_effort: medium        # THE reasoning knob
+                                  #   none | null | ""        -> thinking/reasoning OFF
+                                  #   a level the provider has -> sent as-is
+                                  #     (minimal | low | medium | high)
+                                  #   a level it does not have -> nearest supported one
+                                  #     (xhigh | ultra | ... -> high)
+  timeout_s: 300                  # seconds per request
+  retries: 2
+  # max_tokens: 32000             # optional cost ceiling; absent = provider default
   extra_body: {}                  # escape hatch: verbatim extra JSON fields
 
-# --- API keys + per-provider model / reasoning mapping -----------------------
-# One block per provider. `value` is the secret, everything else is optional and
-# describes how to *use* the provider:
+# --- API keys + endpoint per provider ----------------------------------------
+# Every block uses the same fields; only the first four are normally filled in:
 #
-#   kind          openai-compatible | anthropic | gemini   (request shape)
-#   default_model the id used unless llm.model overrides it
-#   models        the ids that may be selected (reasoning: true/false per id)
-#   reasoning     protocol details for the single reasoning_effort knob: which
-#                 levels this API supports, the request field name, how "off"
-#                 is spelled.  Data, not code - a provider that spells it
-#                 differently only needs a config edit.  Values here were
-#                 measured against the live API (tools/llm_probe.py); this
-#                 endpoint silently ignores unknown fields, so "accepted" alone
-#                 proves nothing.
-#   options       per-provider request overrides (temperature, max_tokens, ...)
-#   extra_body    verbatim extra JSON fields (escape hatch)
+#   value          the secret
+#   env            variable name exported by `ws-config export`
+#   base_url       endpoint (empty -> provider default)
+#   default_model  model id used unless llm.model overrides it
+#   kind           openai-compatible (default) | anthropic | gemini
+#   extra_body     optional verbatim extra JSON fields
 #
-# Non-LLM keys (tavily, slack, ...) only need value/env/base_url.
+# Model ids are discovered from the endpoint itself (`GET /v1/models` -> e.g.
+# deepseek-flash, deepseek-v4-pro), so there is no list to keep in sync here. How
+# the reasoning knob is spelled, and which levels exist, follows `kind` and lives
+# in tools/wsconfig.py (KIND_DIALECTS) - measured against the live API, not guessed.
+#
+# Non-LLM service keys (tavily, slack, ...) only need value/env/base_url.
 api_keys:
-  # --- the provider this workspace actually uses ----------------------------
+  # --- the provider this workspace uses ------------------------------------
   deepseek:
     value: ""
     env: DEEPSEEK_API_KEY
     base_url: https://api.deepseek.com/v1
-    # --- request shape ------------------------------------------------------
-    kind: openai-compatible
-    # --- model selection ----------------------------------------------------
-    default_model: deepseek-flash
-    models:
-      - { id: deepseek-flash,  reasoning: true }
-      - { id: deepseek-v4-pro, reasoning: true }
-    # --- reasoning (optional: protocol details, not a knob) ----------------
-    # The knob is reasoning_effort (above). measured 2026-09-11 against this endpoint
-    # with tools/llm_probe.py (max_tokens=32k, one run per level, monotonic):
-    #   off       -> no reasoning_content at all, reasoning_tokens null
-    #   minimal   ~5.2k   low ~6.9k   medium ~12.7k   high ~18.4k reasoning tokens
-    #   xhigh/ultra -> snap to high (this API has no such levels)
-    # thinking.budget_tokens, enable_thinking and chat_template_kwargs are accepted
-    # but silently ignored. Model ids: deepseek-flash, deepseek-v4-pro (else HTTP 400).
-    reasoning_effort: medium      # this provider's default, overrides llm.reasoning_effort
-    reasoning:
-      supported: [minimal, low, medium, high]   # values this API really honours
-      # param: reasoning_effort                 # request field name (default: the same)
-      # map: { xhigh: high }                    # explicit mapping (default: snap down)
-      # disabled_body: { thinking: { type: disabled } }   # sent when effort is none/null/""
-    options: {}
-    extra_body: {}
-  # --- optional providers: same schema, nothing required until you add a key --
-  openai:     { value: "", env: OPENAI_API_KEY,    base_url: "", kind: openai-compatible, default_model: "", models: [], extra_body: {} }
-  anthropic:  { value: "", env: ANTHROPIC_API_KEY, base_url: "", kind: anthropic,         default_model: "", models: [], extra_body: {} }
-  gemini:     { value: "", env: GEMINI_API_KEY,    base_url: "", kind: gemini,            default_model: "", models: [], extra_body: {} }
-  # --- non-LLM service keys -------------------------------------------------
+    default_model: deepseek-flash        # this endpoint also serves deepseek-v4-pro
+  # --- optional providers: same fields, add one when you have a key --------
+  openai:     { value: "", env: OPENAI_API_KEY,    base_url: "", default_model: "" }
+  anthropic:  { value: "", env: ANTHROPIC_API_KEY, base_url: "", default_model: "", kind: anthropic }
+  gemini:     { value: "", env: GEMINI_API_KEY,    base_url: "", default_model: "", kind: gemini }
+  # --- non-LLM service keys ------------------------------------------------
   tavily:     { value: "", env: TAVILY_API_KEY,    base_url: "" }
   slack:      { value: "", env: SLACK_BOT_TOKEN,   base_url: "" }
   # add more as needed, e.g.:
