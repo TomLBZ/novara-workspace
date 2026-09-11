@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>novara · workspace dashboard</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="dot" id="dot"></span>
+    <h1>novara workspace</h1>
+  </div>
+  <div class="meta">
+    <a id="public-link" href="#" target="_blank" rel="noopener">—</a>
+    <span class="sep">·</span>
+    <span id="updated">loading…</span>
+    <button id="refresh" title="refresh now">↻</button>
+  </div>
+</header>
+
+<div id="error" class="error" hidden></div>
+
+<main>
+  <section class="card" id="card-public">
+    <h2>Public entry</h2>
+    <div class="kv">
+      <div><span>address</span><b id="pub-url">—</b></div>
+      <div><span>watcher state</span><b id="pub-state">—</b></div>
+      <div><span>browser latency</span><b id="pub-latency">—</b></div>
+    </div>
+    <p class="hint">chain: cloudflare → cloud NPM → ZeroTier → host NPM → ws-gateway → this container</p>
+  </section>
+
+  <section class="card">
+    <h2>Services</h2>
+    <table id="services"><thead><tr><th>service</th><th>pid</th><th>ports</th><th>health</th></tr></thead><tbody></tbody></table>
+  </section>
+
+  <section class="card">
+    <h2>Projects &amp; routes</h2>
+    <table id="routes"><thead><tr><th>path</th><th>type</th><th>target</th></tr></thead><tbody></tbody></table>
+    <p class="hint">add a service by editing <code>services/gateway/routes.json</code>, then <code>ws-gateway restart</code></p>
+  </section>
+
+  <section class="card">
+    <h2>Watchers</h2>
+    <table id="watchers"><thead><tr><th>job</th><th>schedule</th><th>last run</th><th>status</th></tr></thead><tbody></tbody></table>
+    <p class="hint">per-minute no-LLM watchdog keeps services alive across container rebuilds</p>
+  </section>
+
+  <section class="card">
+    <h2>Container</h2>
+    <div class="kv" id="system"></div>
+  </section>
+
+  <section class="card wide">
+    <h2>Recent requests</h2>
+    <pre id="requests">—</pre>
+  </section>
+</main>
+<script data-cfasync="false" src="/assets/app.js"></script>
+</body>
+</html>

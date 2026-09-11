@@ -40,8 +40,10 @@ ws-verify --relocate                  # + copy the tree elsewhere, self-heal, re
 │   └── home/                #   XDG cache/config/data, history — kept inside the workspace
 ├── venvs/py/                # relocatable venv (python 3.13) with base packages
 ├── services/                # long-running local services
+│   ├── services.json        #   the manifest: every service ws-gateway keeps alive
 │   ├── gateway/             #   ws-gateway + routes.json (public fan-out by path prefix)
-│   └── sites/hello/         #   hello-world site served at /
+│   ├── dashboard/           #   ws-dashboard: the ops UI served at /
+│   └── sites/hello/         #   hello-world project, served at /projects/hello
 ├── projects/                # your work goes here
 ├── logs/                    # verify logs etc.
 └── tmp/                     # scratch
@@ -265,15 +267,31 @@ Invariants for the proxy -> proxy hop (measured, not guessed):
   the existing one: `*.remoteblossom.com` does not cover `novara.local.remoteblossom.com` (a
   wildcard matches exactly one label), so a swapped certificate breaks every internal user.
 
-Then `ws-gateway restart` (the table is read at start-up). `/healthz` is reserved by the router,
-and both listen ports carry the same table, so NPM can forward to either one. Route matching is
-longest-prefix; `strip_prefix` decides whether the prefix is removed before forwarding.
+The live table (2026-09-11) — the dashboard owns `/`, projects live under a prefix of their own:
 
-**Surviving a new image.** Everything the router needs lives on the bind-mounted workspace
-(`services/gateway/`, `bin/ws-gateway`) and runs on the workspace's own venv python, so a
-container rebuilt from a different image restores the public entry point without image changes:
-the Hermes cron job **`ws-gateway watchdog`** (every minute, no LLM) runs `ws-gateway ensure`,
-bringing the router back within ~60 s and staying silent while it is healthy. Its glue script
+```
+/projects/hello   static  services/sites/hello     hello-world project
+/                 proxy   http://127.0.0.1:8090    ws-dashboard (UI + /api/status)
+```
+
+`/healthz` is reserved by the router, and both listen ports carry the same table, so NPM can forward
+to either one. Route matching is longest-prefix; `strip_prefix` decides whether the prefix is
+removed before forwarding. After editing `routes.json`, `ws-gateway restart gateway` (the table is
+read at start-up).
+
+**Services.** `services/services.json` is the manifest of everything that must stay up; each entry
+declares `script`, `probe_ports`, `health` and `log`, and every service implements
+`--healthz PORT` (exit 0 when it answers its health path). `ws-gateway status` shows them all,
+`ws-gateway start|stop|restart [SERVICE ...]` controls one or all, and `ensure` starts whatever is
+down — which is what the cron watchdog calls. `ws-dashboard` (config: `services/dashboard/config.json`)
+renders services, routes, watchers, container stats and the last requests, and its own `/api/status`
+is the machine-readable version of the same view.
+
+**Surviving a new image.** Every service lives on the bind-mounted workspace (`services/`,
+`bin/ws-gateway`) and runs on the workspace's own venv python, so a container rebuilt from a
+different image restores the public entry point without image changes: the Hermes cron job
+**`ws-gateway watchdog`** (every minute, no LLM) runs `ws-gateway ensure`, bringing everything back
+within ~60 s and staying silent while it is healthy. Its glue script
 (`$HERMES_HOME/scripts/ws-gateway-ensure.sh`) is deployment wiring, deliberately outside the
 workspace.
 
@@ -394,6 +412,13 @@ or `api_keys.*` are empty placeholders the corresponding check is skipped instea
   `/probe/missing.html` → `404` (status and body passed through)
 - watchdog proven end to end: router killed at `20:36:57Z`, back up at `20:37:49Z` — the
   per-minute cron job restored it in 52 s without any image-side change
+- **dashboard live (2026-09-11 21:54Z)**: `https://novara.remoteblossom.com/` → `200` (rendered in a
+  real browser: services up, watcher states, container stats, 60 ms browser round trip),
+  `/api/status` → `200` JSON, `/projects/hello/` → `200` (hello page, still wired to `/healthz`),
+  `/assets/*` → `200`, unknown path → `404`
+- **Cloudflare Rocket Loader rewrites `<script>` tags** on this zone (it rewrote
+  `/assets/app.js` and deferred the inline script). Both pages carry `data-cfasync="false"` to opt
+  out; turning Rocket Loader off for the zone is the cleaner fix
 - **public leg live (2026-09-11 21:32Z)**: `https://novara.remoteblossom.com/healthz` → `200` with
   this workspace's JSON in 0.40 s, `/` → `200` (hello page), `http://` → `301 https`, and the
   ZeroTier-side name `novara.local.remoteblossom.com` still returns `200` in parallel — the two

@@ -28,14 +28,15 @@
   <dl>
     <dt>public URL</dt><dd><code id="pub">novara.remoteblossom.com</code></dd>
     <dt>router</dt><dd>ws-gateway &middot; <span id="gw">checking…</span></dd>
+    <dt>project</dt><dd><code>/projects/hello</code> &middot; <a href="/" style="color:#7ee787">back to the dashboard</a></dd>
     <dt>container</dt><dd id="host">d81d8e4eec89</dd>
     <dt>rendered</dt><dd id="now">2026-09-11 20:34:03Z</dd>
   </dl>
   <footer>Route table: <code>services/gateway/routes.json</code> — add a path prefix to publish another local service.</footer>
 </main>
-<script>
+<script data-cfasync="false">
   document.getElementById('now').textContent = new Date().toISOString();
-  fetch('healthz', {cache: 'no-store'}).then(r => r.json()).then(j => {
+  fetch('/healthz', {cache: 'no-store'}).then(r => r.json()).then(j => {
     document.getElementById('gw').textContent = 'healthy · pid ' + j.pid + ' · ports ' + j.listen.join(', ');
   }).catch(() => {
     const el = document.getElementById('gw');

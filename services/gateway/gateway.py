@@ -30,7 +30,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 WS_ROOT = HERE.parents[1]
 ROUTES_FILE = HERE / "routes.json"
-PID_FILE = WS_ROOT / "runtime" / "run" / "ws-gateway.pid"
+PID_FILE = Path(os.environ.get("WS_PID_FILE", str(WS_ROOT / "runtime" / "run" / "gateway.pid")))
 
 HOP_BY_HOP = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -197,8 +197,14 @@ def probe(port: int) -> int:
     """--healthz PORT: exit 0 when the router answers /healthz on that port."""
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=3) as s:
-            s.sendall(b"GET /healthz HTTP/1.0\r\nHost: localhost\r\n\r\n")
-            data = s.recv(512).decode("utf-8", "replace")
+            s.sendall(b"GET /healthz HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            chunks = []
+            while True:                      # a single recv() can split headers from body
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            data = b"".join(chunks).decode("utf-8", "replace")
     except OSError:
         return 1
     return 0 if '"status": "ok"' in data else 1
