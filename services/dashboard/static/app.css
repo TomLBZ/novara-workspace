@@ -30,3 +30,24 @@ pre { margin:0; max-height:260px; overflow:auto; font-size:.78rem; color:#c9d1d9
 code { background:#131c26; padding:.1rem .35rem; border-radius:5px; }
 .hint { color:var(--dim); font-size:.78rem; margin:.7rem 0 0; }
 .error { margin:1rem 1.5rem 0; padding:.7rem 1rem; border:1px solid #5c2b2b; background:#1d1013; color:#ffb4ad; border-radius:10px; font-size:.88rem; }
+
+/* files panel */
+.grow { flex:1 1 auto; }
+.files-bar { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; margin-bottom:.8rem; }
+.files-bar input { background:#131c26; color:var(--fg); border:1px solid var(--line); border-radius:7px; padding:.25rem .5rem; font:inherit; font-size:.85rem; min-width:13rem; }
+.crumb { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.85rem; background:#131c26; padding:.15rem .5rem; border-radius:6px; overflow-wrap:anywhere; }
+.scope-chip { font-size:.7rem; text-transform:uppercase; letter-spacing:.06em; padding:.15rem .5rem; border-radius:999px; border:1px solid var(--line); color:var(--dim); white-space:nowrap; }
+.scope-chip.admin { color:#08130a; background:var(--ok); border-color:var(--ok); }
+.files-split { display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,1fr); gap:1rem; }
+@media (max-width:900px) { .files-split { grid-template-columns:1fr; } }
+.files-tree { max-height:420px; overflow:auto; border:1px solid var(--line); border-radius:10px; }
+#files-list tr { cursor:pointer; }
+#files-list tr:hover td { background:rgba(121,192,255,.07); }
+#files-list tr.dir td:first-child { color:#79c0ff; }
+#files-list tr.denied { cursor:not-allowed; opacity:.5; }
+.files-preview { display:flex; flex-direction:column; gap:.45rem; min-width:0; }
+.preview-head { display:flex; justify-content:space-between; gap:.6rem; font-size:.85rem; min-width:0; }
+.preview-head b { font-weight:500; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:.83rem; overflow-wrap:anywhere; }
+#files-preview { max-height:420px; overflow:auto; background:#0c1219; border:1px solid var(--line); border-radius:10px; padding:.6rem .7rem; white-space:pre-wrap; }
+#files-preview-media img { max-width:100%; max-height:320px; border:1px solid var(--line); border-radius:10px; }
+button:disabled { opacity:.4; cursor:not-allowed; }

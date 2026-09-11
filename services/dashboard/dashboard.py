@@ -4,10 +4,11 @@
 Serves the UI plus a small JSON API and is reached from the public entry point
 through ws-gateway (route "/" -> http://127.0.0.1:8090).
 
-  /              UI (static/index.html)
-  /assets/<f>    static assets
-  /api/status    aggregated live JSON
-  /api/health    {"status": "ok"}   <- shared service contract
+  /                UI (static/index.html)
+  /assets/<f>      static assets
+  /api/status      aggregated live JSON
+  /api/health      {"status": "ok"}   <- shared service contract
+  /api/files/*     read-only file browser (files.py): access, list, read, raw, unlock
 
 Every workspace service implements `--healthz PORT`: exit 0 when it answers its
 health path on that port.  bin/ws-gateway uses that to keep services alive.
@@ -27,7 +28,12 @@ import urllib.parse
 
 HERE = pathlib.Path(__file__).resolve().parent
 WS_ROOT = HERE.parents[1]
-CFG = json.loads((HERE / "config.json").read_text())
+CFG_PATH = pathlib.Path(os.environ.get("WS_DASHBOARD_CONFIG") or (HERE / "config.json"))
+CFG = json.loads(CFG_PATH.read_text())
+sys.path.insert(0, str(HERE))
+from files import FileBrowser  # noqa: E402  (same directory, stdlib-only)
+
+BROWSER = FileBrowser(WS_ROOT, CFG.get("files", {}))
 STATIC = HERE / "static"
 PID_FILE = pathlib.Path(os.environ.get("WS_PID_FILE", str(WS_ROOT / "runtime" / "run" / "dashboard.pid")))
 STARTED = time.time()
@@ -234,6 +240,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "recent_requests": collect_requests(),
             })
             return
+        if path.startswith("/api/files/"):
+            self._files(path)
+            return
         if path.startswith("/assets/"):
             name = pathlib.Path(path).name
             ctype = "text/css; charset=utf-8" if name.endswith(".css") else \
@@ -265,6 +274,89 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
+    def _token(self) -> str:
+        """Admin token from the request header (preferred: it never lands in a URL/log)."""
+        supplied = self.headers.get("X-WS-Files-Token") or ""
+        if not supplied:
+            auth = self.headers.get("Authorization") or ""
+            if auth.lower().startswith("bearer "):
+                supplied = auth[7:]
+        return supplied.strip()
+
+    def _query(self) -> dict:
+        """Query string as a dict; no `+`-as-space rewriting, so filenames survive."""
+        out = {}
+        for part in urllib.parse.urlsplit(self.path).query.split("&"):
+            if not part:
+                continue
+            key, _, value = part.partition("=")
+            out[urllib.parse.unquote(key)] = urllib.parse.unquote(value)
+        return out
+
+    def _files(self, path: str) -> None:
+        supplied = self._token()
+        if supplied and not BROWSER.check_token(supplied):
+            left = BROWSER.note_failure(self.client_address[0])
+            self._json({"error": "invalid token", "attempts_left": left}, 401)
+            return
+        if supplied:
+            BROWSER.note_success(self.client_address[0])
+        scope = "admin" if supplied else "root"
+        query = self._query()
+        rel = query.get("path", "")
+        if path == "/api/files/access":
+            self._json({**BROWSER.describe(scope), "authenticated": scope == "admin"})
+            return
+        if path == "/api/files/list":
+            payload, error, status = BROWSER.listing(rel, scope)
+        elif path == "/api/files/read":
+            limit = query.get("max")
+            payload, error, status = BROWSER.preview(rel, scope, int(limit) if limit and limit.isdigit() else None)
+        elif path == "/api/files/raw":
+            body, ctype, error, status = BROWSER.raw(rel, scope)
+            if error:
+                self._json({"error": error, "path": rel, "scope": scope}, status)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+            return
+        else:
+            self._json({"error": "not found", "path": path}, 404)
+            return
+        if error:
+            self._json({"error": error, "path": rel, "scope": scope}, status)
+            return
+        self._json(payload)
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = urllib.parse.urlsplit(self.path).path
+        if path != "/api/files/unlock":
+            self._json({"error": "read-only API; only /api/files/unlock accepts POST", "path": path}, 405)
+            return
+        client = self.client_address[0]
+        wait = BROWSER.locked(client)
+        if wait > 0:
+            self._json({"error": f"too many attempts; try again in {int(wait) + 1}s", "locked_for": int(wait) + 1}, 429)
+            return
+        try:
+            length = min(int(self.headers.get("Content-Length") or 0), 4096)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            token = str(body.get("token") or "")
+        except (TypeError, ValueError):
+            self._json({"error": "expected JSON body {\"token\": \"...\"}"}, 400)
+            return
+        if not BROWSER.check_token(token):
+            left = BROWSER.note_failure(client)
+            self._json({"error": "invalid token", "attempts_left": left}, 401)
+            return
+        BROWSER.note_success(client)
+        self._json({"ok": True, **BROWSER.describe("admin"), "authenticated": True})
+
     do_HEAD = do_GET
 
     def log_message(self, fmt, *args):  # access log stays short
@@ -278,6 +370,9 @@ def probe_health(port: int) -> int:
 
 def main() -> int:
     host, port = CFG.get("listen_host", "127.0.0.1"), int(CFG.get("listen_port", 8090))
+    token, source = BROWSER.ensure_token()
+    print("file browser: admin token source=%s scopes: %s (read-only) | print it with: %s --files-token" % (
+        source, BROWSER.rel_root + " -> " + BROWSER.rel_admin_root, pathlib.Path(__file__).name), flush=True)
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(str(os.getpid()))
     httpd = DashboardServer((host, port), Handler)
@@ -300,4 +395,9 @@ def main() -> int:
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--healthz":
         sys.exit(probe_health(int(sys.argv[2])))
+    if len(sys.argv) >= 2 and sys.argv[1] == "--files-token":
+        token, source = BROWSER.rotate_token() if "--rotate" in sys.argv else BROWSER.ensure_token()
+        print(token)
+        print("# source: %s" % source, file=sys.stderr)
+        sys.exit(0)
     sys.exit(main())

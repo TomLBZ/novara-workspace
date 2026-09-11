@@ -324,7 +324,7 @@ The live table (2026-09-11) — the dashboard owns `/`, projects live under a pr
 
 ```
 /projects/hello   static  services/sites/hello     hello-world project
-/                 proxy   http://127.0.0.1:8090    ws-dashboard (UI + /api/status)
+/                 proxy   http://127.0.0.1:8090    ws-dashboard (UI + /api/status + /api/files/*)
 ```
 
 `/healthz` is reserved by the router, and both listen ports carry the same table, so NPM can forward
@@ -340,6 +340,25 @@ declares `script`, `probe_ports`, `health` and `log`, and every service implemen
 down — which is what the cron watchdog calls. `ws-dashboard` (config: `services/dashboard/config.json`)
 renders services, routes, watchers, container stats and the last requests, and its own `/api/status`
 is the machine-readable version of the same view.
+
+**File browser.** `ws-dashboard` also serves a **read-only** file browser (`/api/files/access|list|read|raw`,
+UI card "Files"; implementation `services/dashboard/files.py`). Two scopes: without a token it browses
+`files.root` (default `projects`); pasting the admin token widens it to the workspace root
+(`files.admin_root`). Secrets stay unreadable in **both** scopes - `config.yaml`, `config/keys/**`,
+`.git/**`, `.env*`, `*.pem`, `*.key`, `id_rsa*` - and every request resolves under its scope root, so
+`..`, absolute paths and symlinks cannot escape. Nothing is ever written.
+
+The token is read from `config.yaml` -> `dashboard.admin_token` when set; otherwise it is generated on
+first start into `config/dashboard-admin-token` (mode 0600, gitignored). Reveal or rotate it with
+
+```bash
+services/dashboard/dashboard.py --files-token            # print it (generates on first call)
+services/dashboard/dashboard.py --files-token --rotate   # new token, old one dies at once
+```
+
+Five wrong tokens from one client lock the unlock endpoint for 5 minutes. Knobs live in
+`services/dashboard/config.json` under `files` (`root`, `admin_root`, `token_file`, `max_entries`,
+`max_preview_bytes`, `max_raw_bytes`, `deny_extra`).
 
 **Surviving a new image.** Every service lives on the bind-mounted workspace (`services/`,
 `bin/ws-gateway`) and runs on the workspace's own venv python, so a container rebuilt from a

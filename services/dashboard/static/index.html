@@ -44,6 +44,34 @@
     <p class="hint">add a service by editing <code>services/gateway/routes.json</code>, then <code>ws-gateway restart</code></p>
   </section>
 
+  <section class="card wide" id="card-files">
+    <h2>Files</h2>
+    <div class="files-bar">
+      <button id="files-up" title="parent directory">↑</button>
+      <span class="crumb" id="files-path">—</span>
+      <span class="scope-chip" id="files-scope">anonymous · projects</span>
+      <span class="grow"></span>
+      <input id="files-token" type="password" placeholder="admin token" autocomplete="off" spellcheck="false">
+      <button id="files-unlock">unlock</button>
+      <button id="files-lock" hidden>lock</button>
+      <button id="files-reload" title="reload listing">↻</button>
+    </div>
+    <div class="files-split">
+      <div class="files-tree">
+        <table id="files-list">
+          <thead><tr><th>name</th><th>type</th><th>size</th><th>modified</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="files-preview">
+        <div class="preview-head"><b id="files-preview-name">nothing selected</b><span id="files-preview-meta" class="dim"></span></div>
+        <pre id="files-preview">click a file to preview it (text is capped; images render inline)</pre>
+        <div id="files-preview-media"></div>
+      </div>
+    </div>
+    <p class="hint" id="files-hint">read-only · browsing <code>projects/</code>; paste the admin token to widen the scope to the workspace root — secrets (<code>config.yaml</code>, keys, <code>.env</code>) stay denied in both scopes.</p>
+  </section>
+
   <section class="card">
     <h2>Watchers</h2>
     <table id="watchers"><thead><tr><th>job</th><th>schedule</th><th>last run</th><th>status</th></tr></thead><tbody></tbody></table>

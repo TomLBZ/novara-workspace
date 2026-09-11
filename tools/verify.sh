@@ -260,11 +260,39 @@ print(("ok:" + state) if ok else "MISMATCH:%s" % json.dumps(body))
   leaked="$(python -c 'import sys;print(",".join(p for p in sys.path if p.startswith("/usr/lib/python") or p.startswith("/usr/local/lib/python")) or "none")')"
   [ "$leaked" = "none" ] && ok "no host site-packages on sys.path" || wrn "host paths visible: $leaked"
   [ "${PYTHONNOUSERSITE:-}" = "1" ] && ok "PYTHONNOUSERSITE=1 (no ~/.local leakage)" || wrn "PYTHONNOUSERSITE unset"
+
+  sect "9. dashboard file browser (read-only API)"
+  if [ -f "$WS_ROOT/services/dashboard/files.py" ]; then
+    local fb_cfg fb_out fb_rc
+    fb_cfg="$(python -c "
+import json,sys
+cfg=json.load(open('$WS_ROOT/services/dashboard/config.json'))
+print(cfg.get('files',{}).get('root','<missing>'))")"
+    [ "$fb_cfg" = "projects" ] && ok "config.json files.root defaults to projects" \
+      || wrn "config.json files.root is '$fb_cfg' (expected 'projects')"
+    for suite in test_files.py test_http.py; do
+      fb_out="$(cd "$WS_ROOT" && python3 "services/dashboard/tests/$suite" 2>&1)"; fb_rc=$?
+      if [ "$fb_rc" -eq 0 ]; then
+        ok "dashboard $suite: $(printf '%s' "$fb_out" | grep -c '^PASS\|ok$') checks passed"
+      else
+        bad "dashboard $suite failed (rc=$fb_rc)"
+        printf '%s\n' "$fb_out" | grep -E 'FAIL|failed|Error' | sed 's/^/      /' | head -8
+      fi
+    done
+    if grep -qE '^\s*"projects"|files' "$WS_ROOT/services/dashboard/config.json" \
+       && grep -q 'dashboard-admin-token' "$WS_ROOT/.gitignore"; then
+      ok "generated admin token file is gitignored"
+    else
+      bad "config/dashboard-admin-token is not covered by .gitignore"
+    fi
+  else
+    wrn "services/dashboard/files.py missing - file browser not installed"
+  fi
 }
 
 # --- 9. relocation test ----------------------------------------------------
 relocation_test() {
-  sect "9. relocation test (copy -> self-heal -> re-verify)"
+  sect "10. relocation test (copy -> self-heal -> re-verify)"
   local scratch
   scratch="${WS_RELOCATE_DIR:-$(mktemp -d 2>/dev/null || echo "$WS_ROOT/../ws-reloc-$$")}"
   mkdir -p "$scratch"
