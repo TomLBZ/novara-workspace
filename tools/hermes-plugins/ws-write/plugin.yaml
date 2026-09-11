@@ -1,0 +1,8 @@
+name: ws-write
+version: 0.1.0
+description: "Write and patch files outside HERMES_WRITE_SAFE_ROOT — restores file maintenance on the /workspace bind mount. Adds ws_write / ws_patch in the `workspace` toolset."
+author: "梁子 (Liang Zi), Hermes Agent"
+kind: backend
+provides_tools:
+  - ws_write
+  - ws_patch

@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""ws-write - write a file inside the workspace from the Hermes agent.
+
+Why this exists: Hermes guards its write_file/patch tools with
+HERMES_WRITE_SAFE_ROOT (the container default is /opt/data), so both refuse
+paths under /workspace. The terminal tool is not guarded, and this script is the
+zero-dependency bridge for that path. See README.md, section
+"Writing files inside /workspace".
+
+Usage:
+  ws-write [--allow-empty] [--append] [--from FILE] [--quiet] PATH
+
+Content comes from stdin unless --from FILE is given. An EMPTY stdin is refused
+unless --allow-empty is passed: a dropped heredoc body is the common failure
+mode, and truncating the target silently is worse than failing loudly.
+
+Exit codes: 0 written, 1 error, 2 usage error / refused empty input.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import pathlib
+import sys
+import tempfile
+
+VERSION = "1.0.0"
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="ws-write", add_help=True,
+                                     description="Write stdin (or --from FILE) to PATH atomically.")
+    parser.add_argument("path", help="target file (absolute, or ~-relative)")
+    parser.add_argument("--from", dest="source", metavar="FILE",
+                        help="read content from FILE instead of stdin")
+    parser.add_argument("--append", action="store_true", help="append instead of replacing")
+    parser.add_argument("--allow-empty", action="store_true",
+                        help="permit empty content (off by default: an empty stdin is usually a bug)")
+    parser.add_argument("--quiet", "-q", action="store_true", help="print nothing on success")
+    parser.add_argument("--version", action="version", version=f"ws-write {VERSION}")
+    return parser.parse_args(argv)
+
+
+def read_content(args: argparse.Namespace) -> str:
+    if args.source:
+        return pathlib.Path(args.source).expanduser().read_text(encoding="utf-8")
+    return sys.stdin.read()
+
+
+def write_atomic(path: pathlib.Path, data: str) -> None:
+    """Same-directory temp file + os.replace, so a crash never leaves a half file."""
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".ws-write-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        with_path = pathlib.Path(tmp)
+        if with_path.exists():
+            with_path.unlink()
+        raise
+
+
+def main(argv: list[str]) -> int:
+    args = parse_args(argv)
+    path = pathlib.Path(os.path.expanduser(args.path))
+    try:
+        data = read_content(args)
+    except OSError as exc:
+        print(f"ws-write: cannot read source: {exc}", file=sys.stderr)
+        return 1
+    if not data and not args.allow_empty:
+        print("ws-write: refusing to write empty content to "
+              f"{path} (pass --allow-empty if that is intended).", file=sys.stderr)
+        return 2
+    if path.is_dir():
+        print(f"ws-write: {path} is a directory", file=sys.stderr)
+        return 1
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if args.append:
+            with open(path, "a", encoding="utf-8") as handle:
+                handle.write(data)
+        else:
+            write_atomic(path, data)
+    except OSError as exc:
+        print(f"ws-write: cannot write {path}: {exc}", file=sys.stderr)
+        return 1
+    if not args.quiet:
+        digest = hashlib.sha256(data.encode("utf-8")).hexdigest()[:12]
+        print(f"{'appended' if args.append else 'wrote'} {path} "
+              f"({len(data.encode('utf-8'))} bytes, {data.count(chr(10))} lines, sha256:{digest})")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

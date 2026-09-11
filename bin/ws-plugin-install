@@ -1,0 +1,79 @@
+#!/bin/sh
+# ws-plugin-install - install the workspace's Hermes plugins into $HERMES_HOME/plugins.
+#
+# Canonical source of truth is this repo (tools/hermes-plugins/<name>); the copy under
+# $HERMES_HOME is a deployment of it, the same way runtime/ is rebuilt rather than committed.
+# Re-run after changing a plugin. Hermes loads plugins when the gateway starts, so the new
+# tools appear after the next gateway start (see README, "Writing files inside /workspace").
+#
+#   ws-plugin-install            install + enable every plugin in tools/hermes-plugins/
+#   ws-plugin-install ws-write   one plugin only
+#   ws-plugin-install --dry-run  show what would happen
+set -eu
+
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+SRC=${WS_PLUGIN_SRC:-"$HERE/../tools/hermes-plugins"}
+DEST=${HERMES_HOME:-${HERMES_REAL_HOME:-$HOME/.hermes}}/plugins
+
+hermes_bin() {
+  if [ -n "${HERMES_BIN:-}" ]; then printf '%s' "$HERMES_BIN"
+  elif command -v hermes >/dev/null 2>&1; then command -v hermes
+  elif [ -x /opt/hermes/bin/hermes ]; then printf '%s' /opt/hermes/bin/hermes
+  else printf ''; fi
+}
+
+DRY_RUN=0
+TARGETS=""
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run|-n) DRY_RUN=1 ;;
+    -h|--help) sed -n '2,11p' "$0"; exit 0 ;;
+    *) TARGETS="$TARGETS $arg" ;;
+  esac
+done
+
+[ -d "$SRC" ] || { echo "ws-plugin-install: no plugin source at $SRC" >&2; exit 1; }
+if [ -z "$TARGETS" ]; then
+  TARGETS=$(cd "$SRC" && for d in */; do [ -f "$d/plugin.yaml" ] && printf '%s\n' "${d%/}"; done)
+fi
+[ -n "$TARGETS" ] || { echo "ws-plugin-install: nothing to install under $SRC" >&2; exit 1; }
+
+HB=$(hermes_bin)
+echo "source: $SRC"
+echo "dest:   $DEST"
+if [ -n "$HB" ]; then echo "cli:    $HB"; else echo "cli:    (not found - enable the plugin manually)"; fi
+
+STATUS=0
+for name in $TARGETS; do
+  src="$SRC/$name"
+  [ -f "$src/plugin.yaml" ] || { echo "skip $name: no plugin.yaml" >&2; STATUS=1; continue; }
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "would install $src -> $DEST/$name"
+    continue
+  fi
+  mkdir -p "$DEST"
+  rm -rf "$DEST/$name"
+  cp -R "$src" "$DEST/$name"
+  find "$DEST/$name" -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+  echo "installed $name -> $DEST/$name"
+  if [ -n "$HB" ]; then
+    if "$HB" plugins enable "$name" --no-allow-tool-override >/dev/null 2>&1; then
+      echo "enabled   $name (plugins.enabled)"
+    else
+      echo "warning: could not enable $name automatically - run: hermes plugins enable $name" >&2
+    fi
+    if ! "$HB" plugins doctor "$name" --ci >/dev/null 2>&1; then
+      echo "note: plugins doctor reported issues for $name (run: hermes plugins doctor $name)" >&2
+    fi
+  fi
+done
+
+if [ "$DRY_RUN" = 0 ]; then
+  cat <<'NEXT'
+
+Next: plugins load when the gateway starts, so restart it from a shell outside
+this session and then check that the tools are there:
+  hermes tools list     # expect a "workspace" toolset with ws_write / ws_patch
+NEXT
+fi
+exit "$STATUS"

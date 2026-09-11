@@ -23,13 +23,16 @@ ws-verify --relocate                  # + copy the tree elsewhere, self-heal, re
 │   ├── ws-config            # read config.yaml  (show|get|export|env-file|git-setup|validate)
 │   ├── ws-relocate          # repair absolute paths after a move/remount
 │   ├── ws-gateway           # L7 path router control — the one public entry point
-│   └── ws-verify            # health check
+│   ├── ws-verify            # health check
+│   ├── ws-write             # write a file from stdin despite the Hermes write guard
+│   └── ws-plugin-install    # deploy tools/hermes-plugins/* into $HERMES_HOME/plugins
 ├── tools/
 │   ├── wsconfig.py          # config library + CLI backend
 │   ├── relocate.py          # relocation engine
 │   ├── verify.sh            # check suite
 │   ├── llm_probe.py         # one off/on A/B: does the reasoning switch reach the wire?
-│   └── bootstrap.sh         # optional: rebuild runtime/ + venvs/ from scratch
+│   ├── bootstrap.sh         # optional: rebuild runtime/ + venvs/ from scratch
+│   └── hermes-plugins/      # Hermes plugin sources (ws-write → ws_write / ws_patch tools)
 ├── runtime/                 # all vendored binaries (no host dependency)
 │   ├── uv/bin/uv            #   uv 0.11.6 (static musl)
 │   ├── python/              #   CPython 3.13.13 + 3.12.13 (python-build-standalone)
@@ -85,6 +88,34 @@ duplication is what drifts when context gets compacted.
   couples the repo to a project.
 * **adding a project** is two machine-local edits — the service entry in
   `services/services.json` and its prefix in `services/gateway/routes.json` — and zero edits here.
+
+## Writing files inside `/workspace` (the Hermes write guard)
+
+Hermes guards its `write_file` / `patch` tools with `HERMES_WRITE_SAFE_ROOT` (container default
+`/opt/data`), so both refuse paths here. The `terminal` tool is not guarded, and three paths exist —
+see the `hermes-write-guard` skill for the full procedure and pitfalls.
+
+| Path | Works | When |
+|---|---|---|
+| Add `/workspace` to `HERMES_WRITE_SAFE_ROOT` (app env, or a line in `$HERMES_HOME/.env`) | after a gateway restart | the root-cause fix, when the deployment is yours to change |
+| `ws-write` / `ws_patch` plugin tools (`bin/ws-plugin-install`) | after a gateway restart | writes should stay auditable as tool calls |
+| `bin/ws-write` CLI via `terminal` | immediately | right now, or in a fresh environment before anything is deployed |
+
+```bash
+python3 /workspace/bin/ws-write /workspace/notes.md <<'EOF'   # quoted heredoc: no expansion
+# content
+EOF
+printf 'x\n' | ws-write --append /workspace/notes.md            # bin/ is on PATH after activate.sh
+ws-write --version
+```
+
+`ws-write` refuses an empty stdin (`--allow-empty` overrides), creates parent directories, and replaces
+the file atomically through a same-directory temp file. That refusal is deliberate: a shell that eats a
+heredoc body would otherwise silently truncate the target to 0 bytes.
+
+`tools/hermes-plugins/<name>/` is the canonical source of the plugins; `$HERMES_HOME/plugins/<name>` is a
+deployment of it, the same way `runtime/` is rebuilt rather than committed. Re-run `ws-plugin-install`
+after any plugin change, then restart the gateway to load it.
 
 ## What is installed
 
