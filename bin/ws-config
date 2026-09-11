@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# ws-config - read <workspace>/config.yaml (secrets, keys, runtime paths).
+# Runs on the workspace's own python; falls back to the system python.
+set -euo pipefail
+WS_ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -x "$WS_ROOT/venvs/py/bin/python" ]; then
+  PY="$WS_ROOT/venvs/py/bin/python"
+else
+  PY=""
+  for c in "$WS_ROOT"/runtime/python/cpython-*/bin/python3; do [ -x "$c" ] && PY="$c" && break; done
+  [ -n "$PY" ] || PY="$(command -v python3)"
+fi
+exec "$PY" "$WS_ROOT/tools/wsconfig.py" "$@"

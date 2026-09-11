@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# ws-ssh - ssh/ssh-keygen against the workspace's own ssh config.
+#   ws-ssh -T git@github.com          # verify GitHub access with the workspace key
+#   ws-ssh -A host                    # anything ssh accepts (config/ssh_config is used)
+set -euo pipefail
+WS_ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec ssh -F "${WS_SSH_CONFIG:-$WS_ROOT/config/ssh_config}" "$@"

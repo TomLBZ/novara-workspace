@@ -1,0 +1,35 @@
+# ---------------------------------------------------------------------------
+# workspace .gitignore
+# Anything that is machine/secret/local state lives outside version control.
+# ---------------------------------------------------------------------------
+# secrets & credentials
+config.yaml
+.env
+*.env
+config/git-credentials
+config/keys/
+config/gitconfig
+config/ssh_config
+config/ssh_known_hosts
+
+# vendored runtimes & caches (re-installable via tools/bootstrap.sh)
+runtime/
+venvs/
+logs/
+tmp/
+.cache/
+
+# python / node artefacts
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,260 @@
+# /workspace — self-contained agent toolchain
+
+Everything lives **inside this directory**. Nothing was installed system-wide and nothing
+depends on the host beyond a POSIX shell + glibc: copy or bind-mount this tree anywhere and
+it still works (see [Portability](#portability--relocation)).
+
+```bash
+source /workspace/bin/activate.sh     # put python / node / git / uv on PATH
+ws-verify                             # full health check (~10 s)
+ws-verify --relocate                  # + copy the tree elsewhere, self-heal, re-verify
+```
+
+## Layout
+
+```
+/workspace
+├── config.yaml              # ← YOUR config: git credentials, identity, API keys (mode 0600)
+├── config.example.yaml      #   same schema, safe to commit
+├── bin/
+│   ├── activate.sh          # source me — sets PATH + all env vars, self-heals paths
+│   ├── ws-shell             # open a subshell with the toolchain activated
+│   ├── ws-config            # read config.yaml  (show|get|export|env-file|git-setup|validate)
+│   ├── ws-relocate          # repair absolute paths after a move/remount
+│   └── ws-verify            # health check
+├── tools/
+│   ├── wsconfig.py          # config library + CLI backend
+│   ├── relocate.py          # relocation engine
+│   ├── verify.sh            # check suite
+│   └── bootstrap.sh         # optional: rebuild runtime/ + venvs/ from scratch
+├── runtime/                 # all vendored binaries (no host dependency)
+│   ├── uv/bin/uv            #   uv 0.11.6 (static musl)
+│   ├── python/              #   CPython 3.13.13 + 3.12.13 (python-build-standalone)
+│   ├── node/24.21.0|26.8.2  #   node + npm + npx (current → 24.21.0 LTS)
+│   ├── git/                 #   git 2.55.0 + libcurl/openssl/ca-certificates (conda-pack'd)
+│   ├── micromamba/bin/      #   micromamba 2.9.0 (escape hatch for more packages)
+│   ├── cache/               #   uv / pip / npm caches + offline copies of downloads
+│   └── home/                #   XDG cache/config/data, history — kept inside the workspace
+├── venvs/py/                # relocatable venv (python 3.13) with base packages
+├── projects/                # your work goes here
+├── logs/                    # verify logs etc.
+└── tmp/                     # scratch
+```
+
+## What is installed
+
+| Component | Version | Notes |
+|---|---|---|
+| Python | 3.13.13 (default) + 3.12.13 | uv-managed, standalone builds, no system python used |
+| venv | `venvs/py` | relocatable, seeded pip; pyyaml, requests, httpx, rich, tabulate, jsonschema, python-dateutil, python-dotenv, conda-pack |
+| uv | 0.11.6 | package/venv/interpreter manager (`uv pip install`, `uv venv`, `uv python install`) |
+| Node.js | v24.21.0 (LTS, default) + v26.8.2 | official linux-x64 builds; `runtime/node/current` switches |
+| npm / npx | 11.19.0 | cache + global prefix inside the workspace |
+| git | 2.55.0 | bundled with libcurl/openssl/CA bundle → `https://` clones work with no system deps |
+| micromamba | 2.9.0 | static; for any extra conda-forge package |
+
+Approximate footprint: `runtime/` ≈ 665 MB, `venvs/` ≈ 21 MB, whole workspace ≈ 685 MB
+(the ~112 MB under `runtime/cache/` is re-creatable download cache).
+
+## Environment set by `bin/activate.sh`
+
+`PATH` (workspace bins first), `WS_ROOT`, `WS_RUNTIME`, `WS_VENV`, `VIRTUAL_ENV`,
+`UV_PYTHON_INSTALL_DIR`, `UV_CACHE_DIR`, `UV_LINK_MODE=copy`, `PIP_CACHE_DIR`,
+`NPM_CONFIG_CACHE`, `NPM_CONFIG_PREFIX`, `XDG_*_HOME` → `runtime/home/*`,
+`GIT_CONFIG_GLOBAL=config/gitconfig`, `GIT_CONFIG_NOSYSTEM=1`, `GIT_EXEC_PATH`,
+`GIT_TEMPLATE_DIR`, `GIT_SSL_CAINFO`, and `safe.directory` (so git tolerates the
+foreign uid of a bind mount — the usual `dubious ownership` failure).
+
+SSH remotes are wired too: `WS_SSH_CONFIG=config/ssh_config`,
+`WS_SSH_KNOWN_HOSTS=config/ssh_known_hosts`, and `GIT_SSH_COMMAND=ssh -F config/ssh_config`.
+`config/ssh_config` is generated from `config.yaml` (`git.credentials[*].ssh_key`) and points
+only at paths inside the workspace, so `git clone git@github.com:you/repo.git` works with no
+`-i` flag, no `$HOME/.ssh` and no host configuration. It is regenerated automatically when the
+workspace is moved (the `# root:` line no longer matches), which is what makes the ssh setup
+survive relocation. `bin/ws-ssh` runs plain `ssh` against the same config
+(`ws-ssh -T git@github.com`).
+
+## `config.yaml` — one file for credentials and keys
+
+Schema (see `config.example.yaml` for the annotated version):
+
+```yaml
+git:
+  identity:   { name: "", email: "" }
+  credentials:
+    - { id: github, host: github.com, protocol: https, username: "", token: "", ssh_key: "" }
+llm:                 # which provider/model agents use, and how they reason
+  provider: deepseek
+  model: ""          # overrides api_keys.<provider>.default_model
+  request:  { temperature: null, max_tokens: null, top_p: null, timeout_s: 300, retries: 2 }
+  reasoning: { enabled: true, effort: medium, keep_trace: false }
+  extra_body: {}
+api_keys:
+  deepseek:
+    value: ""                                # the secret
+    env: DEEPSEEK_API_KEY
+    base_url: https://api.deepseek.com/v1
+    kind: openai-compatible                  # request shape
+    default_model: deepseek-flash            # used unless llm.model overrides it
+    models: [{ id: deepseek-flash }, { id: deepseek-v4-pro }]
+    reasoning:                               # how this provider spells thinking/depth
+      param: thinking.type
+      on_value: enabled
+      off_value: disabled
+      effort_param: reasoning_effort
+      effort_verified: true
+      levels: { minimal: minimal, low: low, medium: medium, high: high }
+    options: {}                              # per-provider request overrides
+    extra_body: {}                           # verbatim extra JSON (escape hatch)
+  openai: { value: "", env: OPENAI_API_KEY, base_url: "", kind: openai-compatible }
+secrets: {}          # free-form NAME: value → exported verbatim
+proxy:   { http: "", https: "", no_proxy: "" }
+```
+
+Usage:
+
+```bash
+ws-config validate                       # structure + which fields are still empty
+ws-config show                           # whole file, secrets redacted
+ws-config get api_keys.openai.value --reveal
+ws-config git-setup                      # fill git.credentials → writes config/git-credentials (0600)
+                                         #   + config/gitconfig (identity, store helper) — re-run after edits
+ws-config ssh-setup                      # git.credentials[*].ssh_key → config/ssh_config (workspace-local paths)
+ws-config llm [--json] [--request]       # resolved model / reasoning settings + request body
+eval "$(ws-config export)"               # export every non-empty api key / secret
+ws-config env-file .env                  # or write a chmod-600 .env
+python -c "from wsconfig import load, get; print(get(load(),'api_keys.openai.env'))"
+```
+
+The file is mode `0600` and listed in `.gitignore` (together with `config/git-credentials`,
+`config/gitconfig`, `config/ssh_config`, `config/ssh_known_hosts`, `config/keys/`), so secrets
+cannot be committed by accident.
+
+### LLM settings (model, thinking, depth)
+
+`config.yaml` is the single place where "which model, and how hard should it
+think" is decided; no code holds a model name.
+
+```bash
+ws-config llm                       # provider, model, reasoning switch/depth, request options
+ws-config llm --request             # the exact chat-completions body that would be sent
+ws-config export                    # also emits LLM_PROVIDER / LLM_MODEL /
+                                    # LLM_REASONING_ENABLED / LLM_REASONING_EFFORT / LLM_TIMEOUT_S
+python -c "from wsconfig import llm_settings, build_chat_request; \
+           print(build_chat_request([{'role':'user','content':'hi'}], llm_settings()))"
+python tools/llm_probe.py --quick   # live check that the thinking switch really does something
+```
+
+Precedence is *argument → `llm.*` → `api_keys.<provider>.*`, and the provider
+parameter names are **data, not code**: a provider that spells thinking as
+`enable_thinking` or `chat_template_kwargs.thinking` needs a config edit only.
+
+**Verified, not assumed.** This endpoint accepts *any* unknown JSON field with
+HTTP 200 (a junk parameter returns success), so "the request was accepted" proves
+nothing. The values shipped in `config.yaml` were measured against the live API
+(`tools/llm_probe.py`, evidence in `logs/llm-probe-*.json`):
+
+* `thinking.type=disabled` → no `reasoning_content`, `reasoning_tokens: null` — **proven**
+* `reasoning_effort=minimal|low` → ≈4.6k reasoning tokens, `medium|high` → ≈11k (2.4×) — **measured**
+  (medium vs high are not separable at n=1–2 samples)
+* `thinking.budget_tokens`, `enable_thinking`, `chat_template_kwargs` → accepted but **silently
+  ignored**; do not rely on them
+* model ids: `deepseek-flash`, `deepseek-v4-pro`; anything else is rejected with HTTP 400
+
+`reasoning.verified` / `effort_verified` in `config.yaml` record that status, and
+`ws-config validate` keeps nagging about a reasoning block that was never measured
+until it is confirmed or removed.
+
+### Git over SSH (no token needed)
+
+Two credential styles are supported and can coexist:
+
+* **HTTPS + PAT** — put the token in `git.credentials[<i>].token`; `ws-config git-setup` renders
+  `config/git-credentials` (0600) behind git's `store` helper. GitHub no longer accepts
+  passwords, so the token must be a PAT.
+* **SSH key** — put the private key path in `git.credentials[<i>].ssh_key` (e.g.
+  `config/keys/id_ed25519`, relative paths resolve against the workspace root; the key must be
+  mode `0600`) and run `ws-config ssh-setup` (or just source `activate.sh`). Nothing else is
+  needed:
+
+  ```bash
+  ws-ssh -T git@github.com            # Hi <user>! You've successfully authenticated…
+  git clone git@github.com:you/repo.git
+  ```
+
+  Pitfall worth knowing: a private key file must end with a **newline** after the
+  `-----END …-----` line. Without it OpenSSH refuses the key with the misleading
+  `error in libcrypto`, which looks like corruption although every field is intact.
+
+**Pending input:** `git.identity.*`, `git.credentials[*].*`, `api_keys.*` are empty
+placeholders — `ws-config validate` lists them. Fill them in and git/API calls start working
+immediately; no other change is needed.
+
+## Portability / relocation
+
+The tree contains a handful of unavoidable absolute paths (venv symlinks + `pyvenv.cfg`,
+entry-point shebangs, uv key symlinks, npm global shims, and prefix strings compiled into the
+bundled git). They all point *inside* the workspace and are repaired by `bin/ws-relocate`,
+which:
+
+1. rewrites uv's interpreter symlinks and every venv symlink to relative links,
+2. rewrites `pyvenv.cfg` and the shebangs of venv entry points,
+3. fixes `runtime/node/current` and npm global shims,
+4. runs `conda-unpack` for the bundled git and binary-safe rewrites any remaining prefix
+   (NUL-padded, the same technique conda itself uses),
+5. records the current root in `runtime/.ws-last-root`.
+
+`activate.sh` calls it automatically when it notices stale paths, so a plain
+`source /workspace/bin/activate.sh` is usually enough after a move. On a new machine:
+
+```bash
+# host side, nothing to install:
+docker run -v /host/workspace:/workspace ...        # or any bind mount / copy
+# inside:
+source /workspace/bin/activate.sh                   # self-heals, then use python/node/git
+ws-verify                                           # confirm 0 FAIL
+```
+
+`tools/bootstrap.sh` is only needed to rebuild `runtime/` + `venvs/` from the internet
+(it re-downloads uv, CPython, node, conda-forge git; no root, no system python required).
+
+## Verification (2026-09-11, Debian 13 · glibc 2.41 · x86_64)
+
+**In place — `ws-verify`: 37 PASS, 0 FAIL, 0 WARN** (full log: `logs/verify-inplace.log`)
+
+- every tool (`python`, `node`, `npm`, `npx`, `git`, `uv`, `ws-config`) resolves *inside* `/workspace`
+- python 3.13.13; `sys.executable` + `sys.prefix` inside the workspace; no host site-packages on `sys.path`
+- real `npm install` + `require` round-trip (lodash.get → `42`); npm cache/prefix workspace-local
+- real `git clone` over https with the bundled git (no system git, no system CA store involved)
+- `config.yaml` present, mode `600`, dot-path reads via `ws-config` work
+- ssh wiring: `GIT_SSH_COMMAND` + `config/ssh_config` resolve to workspace-local paths, and
+  `ssh -T git@github.com` authenticates with the configured key
+
+**Portability — `ws-verify --relocate`: 0 FAIL** (full log: `logs/verify-relocate.log`)
+
+The tree was copied to a *different, longer* path (`/tmp/tmp.XXXX/ws`), self-healed with
+`ws-relocate`, then **moved a second time** (`→ ws-moved`) and every check re-run there:
+
+```
+copied workspace to /tmp/tmp.XXXX/ws (caches excluded, 374M)
+ws-relocate ran cleanly (110 fixes)
+second move (/tmp/tmp.XXXX/ws -> ws-moved) healed (110 fixes)
+bundled interpreter runs from the copy (sys.base_prefix)  → inside the copy
+no functional reference to the original root; no dangling symlinks
+re-verification inside the relocated copy: 37 checks passed, 0 failed
+```
+
+WARNs only ever mean "input still missing": while `git.identity`, `git.credentials[*].ssh_key`
+or `api_keys.*` are empty placeholders the corresponding check is skipped instead of failing.
+`ws-config validate` lists what is outstanding; fill it in and the WARNs disappear.
+
+### Caveat worth knowing
+
+Binary files in the bundled git have the install prefix compiled in. `ws-relocate` rewrites them
+with NUL padding — safe only when the new path is **not longer** than the old one (`/workspace`,
+10 chars). Relocating to a longer path is still fully supported for real work: `activate.sh`
+exports `GIT_EXEC_PATH`, `GIT_CONFIG_SYSTEM`, `GIT_TEMPLATE_DIR`, `GIT_ATTR_SYSTEM` and the CA
+bundle path, so git never falls back to the compiled-in prefix (only cosmetic bits such as
+`git help -m` lose their man pages). To have the binaries rewritten as well, bind-mount at a path
+of ≤10 characters (e.g. `/workspace`) or re-run `tools/bootstrap.sh`.
+

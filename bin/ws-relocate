@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# ws-relocate - repair absolute paths after the workspace is moved / remounted.
+# Runs on the workspace's own bundled python (never the host's), because the
+# host may have no python at all.
+set -euo pipefail
+WS_ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PY=""
+for candidate in "$WS_ROOT"/runtime/python/cpython-3.13*/bin/python3 \
+                 "$WS_ROOT"/runtime/python/cpython-*/bin/python3; do
+  if [ -x "$candidate" ]; then PY="$candidate"; break; fi
+done
+if [ -z "$PY" ]; then
+  PY="$(command -v python3 || true)"
+fi
+if [ -z "$PY" ]; then
+  echo "ws-relocate: no python interpreter found inside $WS_ROOT/runtime/python" >&2
+  exit 1
+fi
+exec "$PY" "$WS_ROOT/tools/relocate.py" "$@"

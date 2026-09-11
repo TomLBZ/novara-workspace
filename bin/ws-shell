@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# ws-shell - open a subshell with the workspace toolchain activated.
+set -euo pipefail
+WS_ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck disable=SC1091
+. "$WS_ROOT/bin/activate.sh"
+exec "${SHELL:-/bin/bash}" "$@"

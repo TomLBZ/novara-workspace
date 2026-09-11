@@ -1,0 +1,176 @@
+# =============================================================================
+#  WORKSPACE CONFIGURATION  --  <workspace>/config.yaml
+# =============================================================================
+#  Single source of truth for this workspace: git credentials, git identity,
+#  API keys and the LLM/model defaults. Everything else in the workspace is
+#  self-contained and needs no configuration at all.
+#
+#  Read it with the bundled CLI (from any shell):
+#     ws-config show                     # whole file, secrets redacted
+#     ws-config get api_keys.openai.value --reveal
+#     ws-config export                   # eval "$(ws-config export)"
+#     ws-config env-file .env            # write a chmod-600 .env
+#     ws-config git-setup                # render config/gitconfig + credentials
+#     ws-config llm                      # resolved model / reasoning settings
+#     ws-config validate                 # structure + placeholder check
+#
+#  Or from python (venv already has PyYAML):
+#     from wsconfig import load, get
+#     get(load(), "api_keys.openai.value")
+#
+#  SECURITY: this file holds secrets -> mode 0600, and it is listed in
+#  .gitignore so it can never be committed by accident.
+# =============================================================================
+
+apiVersion: ws/v1
+
+meta:
+  owner: hermes
+  purpose: supply-chain agent workspace
+  created: "2026-09-11"
+  notes: >-
+    Placeholders below are filled in by the user as credentials become
+    available. Empty fields are harmless: tools simply report them as missing.
+
+# --- where things live -------------------------------------------------------
+# Informational only. The live values are always derived from bin/activate.sh,
+# so the workspace keeps working after being moved / bind-mounted elsewhere.
+paths:
+  root: /workspace
+  runtime: runtime/
+  venv: venvs/py
+  python: runtime/python          # uv-managed CPython (3.13 default, 3.12 also)
+  node: runtime/node              # LTS 24.21.0 (current) + 26.8.2
+  git: runtime/git                # self-contained git + https/ca-certificates
+  uv: runtime/uv/bin/uv
+
+# --- git ---------------------------------------------------------------------
+git:
+  identity:
+    name: ""                      # e.g. "Liang Zi"        -> [user] name
+    email: ""                     # e.g. "liangzi@corp.com" -> [user] email
+  default_branch: main
+  # One entry per host; `ws-config git-setup` renders them into
+  # config/git-credentials (mode 0600) behind git's `store` credential helper.
+  credentials:
+    - id: github
+      host: github.com
+      protocol: https             # https | ssh
+      username: ""                # GitHub username; for a PAT also "x-access-token"
+      token: ""                   # PAT / fine-grained token / app token
+      ssh_key: ""                 # optional private key path, e.g. config/keys/id_ed25519
+      notes: ""
+    - id: other
+      host: ""                    # e.g. gitlab.internal.corp, bitbucket.org
+      protocol: https
+      username: ""
+      token: ""
+      ssh_key: ""
+      notes: ""
+  # Optional raw settings, applied verbatim as `section.key = value`
+  config:
+    init.defaultBranch: main
+    # bind-mounted workspaces usually have a foreign owner uid; without this
+    # git refuses to operate ("dubious ownership")
+    safe.directory: "*"
+    # core.editor: vim
+    # pull.rebase: "false"
+
+# --- LLM defaults ------------------------------------------------------------
+# Which provider/model this workspace's agents use, and how they reason. Every
+# field is optional; per-provider details live in the matching api_keys.<provider>
+# block further down.
+#     ws-config llm                   # resolved settings (human readable)
+#     ws-config llm --request         # the chat-completions body that would be sent
+#     eval "$(ws-config export)"      # LLM_PROVIDER / LLM_MODEL / LLM_REASONING_* ...
+#     python -c "from wsconfig import llm_settings, build_chat_request; print(llm_settings())"
+llm:
+  provider: deepseek              # must be a key of api_keys below
+  fallbacks: []                   # e.g. [openai, anthropic] - tried in order
+  model: ""                       # overrides api_keys.<provider>.default_model
+  request:                        # merged into every chat-completions request
+    temperature: null             # null -> leave the provider default
+    max_tokens: null
+    top_p: null
+    timeout_s: 300                # seconds per request
+    retries: 2
+  reasoning:                      # "thinking" switch + depth, provider-mapped
+    enabled: true                 # false -> thinking off
+    effort: medium                # minimal | low | medium | high
+    keep_trace: false             # drop reasoning_content from logs/answers
+  extra_body: {}                  # escape hatch: verbatim extra JSON fields
+
+# --- API keys + per-provider model / reasoning mapping -----------------------
+# One block per provider. `value` is the secret, everything else is optional and
+# describes how to *use* the provider:
+#
+#   kind          openai-compatible | anthropic | gemini   (request shape)
+#   default_model the id used unless llm.model overrides it
+#   models        the ids that may be selected (reasoning: true/false per id)
+#   reasoning     how this provider spells "thinking on/off" and depth.  The
+#                 parameter names are DATA, not code: a provider that spells it
+#                 differently only needs a config edit.  `verified: true` means
+#                 the effect was measured against the live API (tools/llm_probe.py),
+#                 not merely accepted - this endpoint silently ignores unknown
+#                 parameters, so "accepted" alone proves nothing.
+#   options       per-provider request overrides (temperature, max_tokens, ...)
+#   extra_body    verbatim extra JSON fields (escape hatch)
+#
+# Non-LLM keys (tavily, slack, ...) only need value/env/base_url.
+api_keys:
+  # --- the provider this workspace actually uses ----------------------------
+  deepseek:
+    value: ""
+    env: DEEPSEEK_API_KEY
+    base_url: https://api.deepseek.com/v1
+    # --- request shape ------------------------------------------------------
+    kind: openai-compatible
+    # --- model selection ----------------------------------------------------
+    default_model: deepseek-flash
+    models:
+      - { id: deepseek-flash,  reasoning: true }
+      - { id: deepseek-v4-pro, reasoning: true }
+    # --- reasoning ("thinking") --------------------------------------------
+    # switched/measured 2026-09-11 with tools/llm_probe.py against this endpoint:
+    #   thinking.type=disabled -> no reasoning_content at all (proven)
+    #   reasoning_effort=minimal|low -> ~4.6k reasoning tokens
+    #   reasoning_effort=medium|high -> ~11k reasoning tokens (medium vs high
+    #                                   not separable with n=1-2 samples)
+    # NOT supported (accepted but silently ignored): thinking.budget_tokens,
+    #   enable_thinking, chat_template_kwargs
+    reasoning:
+      verified: true
+      param: thinking.type          # bool/dotted path set in the request body
+      on: enabled
+      off: disabled
+      effort_param: reasoning_effort
+      effort_verified: true
+      levels: { minimal: minimal, low: low, medium: medium, high: high }
+    options: {}
+    extra_body: {}
+  # --- optional providers: same schema, nothing required until you add a key --
+  openai:     { value: "", env: OPENAI_API_KEY,    base_url: "", kind: openai-compatible, default_model: "", models: [], extra_body: {} }
+  anthropic:  { value: "", env: ANTHROPIC_API_KEY, base_url: "", kind: anthropic,         default_model: "", models: [], extra_body: {} }
+  gemini:     { value: "", env: GEMINI_API_KEY,    base_url: "", kind: gemini,            default_model: "", models: [], extra_body: {} }
+  # --- non-LLM service keys -------------------------------------------------
+  tavily:     { value: "", env: TAVILY_API_KEY,    base_url: "" }
+  slack:      { value: "", env: SLACK_BOT_TOKEN,   base_url: "" }
+  # add more as needed, e.g.:
+  # aws:      { value: "", env: AWS_SECRET_ACCESS_KEY, base_url: "" }
+# --- free-form secrets -------------------------------------------------------
+# Anything not covered above. Keys are used verbatim as environment-variable
+# names by `ws-config export`.
+secrets: {}
+  # INTERNAL_ERP_TOKEN: ""
+  # SMTP_PASSWORD: ""
+
+# --- networking --------------------------------------------------------------
+proxy:
+  http: ""                        # e.g. http://proxy.corp:8080  ("" = direct)
+  https: ""
+  no_proxy: ""
+
+# --- behaviour flags ---------------------------------------------------------
+flags:
+  auto_export_api_keys: false     # true -> activate.sh exports api_keys on shell start
+  git_config_scope: global        # workspace-local global gitconfig (config/gitconfig)

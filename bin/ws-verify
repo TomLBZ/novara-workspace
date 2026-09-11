@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# ws-verify - health check for the workspace toolchain.
+#   ws-verify              # check in place
+#   ws-verify --relocate   # also copy the tree elsewhere and re-verify there
+set -euo pipefail
+WS_ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+exec "$WS_ROOT/tools/verify.sh" "$@"
