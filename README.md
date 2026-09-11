@@ -239,8 +239,18 @@ as `172.16.1.2`) forwards that domain to this container's router, which turns on
 into many services by **path prefix**:
 
 ```
-internet -> Cloudflare -> nginx-proxy-manager -> ws-gateway (:80 and :8081) -> local services
+internet -> Cloudflare -> cloud-server NPM -> ZeroTier -> host-machine NPM -> docker -> ws-gateway -> local services
+                                (public wildcard)      (10.147.17.100)   (*.local.remoteblossom.com)
 ```
+
+Verified hops (2026-09-11): Cloudflare -> cloud NPM is the public leg; the host machine is **not**
+exposed publicly (its ZeroTier address is `10.147.17.100`), and the host's NPM serves
+`novara.local.remoteblossom.com` straight through to `ws-gateway` — `curl
+https://novara.local.remoteblossom.com/` returns this workspace's hello page with a
+`CN=*.local.remoteblossom.com` certificate. **The hop between the two proxies must send
+`SNI = novara.local.remoteblossom.com`**: the host's nginx rejects a handshake for a bare IP or for
+the public name (`unrecognized_name`), and a missing SNI is exactly what surfaces as a 502 at the
+cloud proxy. It must also use `https` upstream (`http` on the host answers `301`).
 
 ```bash
 ws-gateway status          # pid, /healthz, listen ports, route table
