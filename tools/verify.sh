@@ -220,7 +220,7 @@ print(("ok:" + state) if ok else "MISMATCH:%s" % json.dumps(body))
     esac
     if [ "${WS_VERIFY_LLM:-0}" = "1" ]; then
       local live
-      live="$(python "$WS_ROOT/tools/llm_probe.py" --quick 2>&1 | tail -3)"
+      live="$(python "$WS_ROOT/tools/llm_probe.py" 2>&1 | tail -3)"
       case "$live" in
         *'"switch_works": true'*) ok "live LLM probe: reasoning_effort=none really suppresses thinking" ;;
         *) wrn "live LLM probe inconclusive (WS_VERIFY_LLM=1): $(printf '%s' "$live" | tail -1)" ;;

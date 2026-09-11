@@ -14,7 +14,6 @@ proves a switch works. This script compares the observable difference instead:
 
     python tools/llm_probe.py                 # A/B with the configured level
     python tools/llm_probe.py --effort high   # A/B with a specific level
-    python tools/llm_probe.py --quick         # same as default (kept for verify.sh)
 """
 from __future__ import annotations
 
@@ -60,7 +59,6 @@ def main() -> int:
     ap.add_argument("--provider", help="api_keys entry to probe (default: llm.provider)")
     ap.add_argument("--model", help="model id (default: resolved model)")
     ap.add_argument("--effort", help="level for the 'on' half (default: the configured one)")
-    ap.add_argument("--quick", action="store_true", help="accepted for compatibility; the default")
     ap.add_argument("--max-tokens", type=int, default=2000)
     args = ap.parse_args()
 

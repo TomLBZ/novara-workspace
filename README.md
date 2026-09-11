@@ -140,7 +140,7 @@ ws-config export                     # also emits LLM_PROVIDER / LLM_KIND / LLM_
                                      # LLM_REASONING_EFFORT (+ LEVEL) / LLM_TIMEOUT_S
 python -c "from wsconfig import llm_settings, build_chat_request; \
            print(build_chat_request([{'role':'user','content':'hi'}], llm_settings()))"
-python tools/llm_probe.py --quick    # live check that reasoning_effort=none really stops thinking
+python tools/llm_probe.py            # live A/B: reasoning_effort=none must really stop thinking
 ```
 
 **There is exactly one reasoning knob: `llm.reasoning_effort`.**
@@ -160,8 +160,8 @@ which levels exist, what "off" looks like - follows `kind` from a table in
 never listed either: they come from the endpoint (`GET /v1/models`), and a wrong id
 is reported by the API itself. `temperature` / `top_p` / `max_tokens` are not
 configuration knobs any more; the first two have no place in a modern request, and
-`max_tokens` survives only as an optional global cost ceiling (`extra_body` can
-express anything else).
+`max_tokens` exists only as an optional global cost ceiling, and `extra_body`
+carries anything else.
 
 **Verified once, then not re-measured.** This endpoint accepts *any* unknown JSON
 field with HTTP 200 (a junk parameter returns success), so "the request was

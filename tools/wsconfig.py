@@ -71,7 +71,6 @@ KIND_DIALECTS = {
 #: every api_keys block, LLM or not, uses this field set and nothing else
 PROVIDER_FIELDS = ("value", "env", "base_url", "default_model", "kind", "extra_body")
 _PROVIDER_REQUIRED = ("value", "env", "base_url", "default_model")
-_LLM_LEGACY_KEYS = ("models", "reasoning", "options", "reasoning_effort")
 #: the global llm block, same idea: one uniform, minimal field set
 LLM_FIELDS = ("provider", "fallbacks", "model", "reasoning_effort",
               "timeout_s", "retries", "max_tokens", "extra_body")
@@ -499,10 +498,10 @@ def cmd_validate(args) -> int:
     for i, fb in enumerate(fallbacks):
         if fb not in apikeys:
             problems.append(f"llm.fallbacks[{i}] '{fb}' is not a key of api_keys")
-    for dead in ("reasoning", "request"):
-        if dead in llm:
-            problems.append(f"llm.{dead} is obsolete - the global block is exactly "
-                            f"{list(LLM_FIELDS)}")
+    unknown_llm = [k for k in llm if k not in LLM_FIELDS]
+    if unknown_llm:
+        problems.append(f"llm: unexpected key(s) {unknown_llm}; the global block is "
+                        f"exactly {list(LLM_FIELDS)}")
     effort_raw = llm.get("reasoning_effort")
     if effort_raw is not None and not isinstance(effort_raw, str):
         problems.append("llm.reasoning_effort must be a string "
@@ -516,13 +515,8 @@ def cmd_validate(args) -> int:
             continue
         unknown = [k for k in entry if k not in PROVIDER_FIELDS]
         if unknown:
-            legacy = [k for k in unknown if k in _LLM_LEGACY_KEYS]
-            hint = ""
-            if legacy:
-                hint = (f" - {legacy[0]} is not configurable any more: model ids come from "
-                        "the endpoint and the reasoning dialect from `kind`")
             problems.append(f"api_keys.{name}: unexpected key(s) {unknown}; a provider block "
-                            f"is exactly {list(PROVIDER_FIELDS)}{hint}")
+                            f"is exactly {list(PROVIDER_FIELDS)}")
         kind = entry.get("kind")
         if kind and kind not in LLM_KINDS:
             problems.append(f"api_keys.{name}.kind '{kind}' not in {list(LLM_KINDS)}")
