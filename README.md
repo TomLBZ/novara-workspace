@@ -218,9 +218,51 @@ ws-verify                                           # confirm 0 FAIL
 `tools/bootstrap.sh` is only needed to rebuild `runtime/` + `venvs/` from the internet
 (it re-downloads uv, CPython, node, conda-forge git; no root, no system python required).
 
+## Publishing: what gets pushed, and what is rebuilt instead
+
+Only the toolchain *source* is versioned. The ~685 MB of runtimes, the venvs and every secret stay
+out of the repo (`.gitignore`) and are re-created on the target machine. Measured 2026-09-11 with
+`git pack-objects` and a real push into a scratch bare repo:
+
+| what | files | raw | pushed |
+|---|---|---|---|
+| committed subset (scripts + docs) | 15 | 92.4 KiB | **36.9 KiB** (pack, both commits) |
+| whole tree incl. `runtime/`, `venvs/` | 32 137 | 684 MiB | 340.2 MiB (pack) — **rejected by GitHub** |
+
+A naive `git add -A -f` + push cannot land anywhere: GitHub refuses any file above 100 MiB, and two
+bundled binaries exceed it (`runtime/node/26.8.2/bin/node` 143.5 MiB, `runtime/node/24.21.0/bin/node`
+120.7 MiB). They are also exactly the parts `tools/bootstrap.sh` fetches anyway, so pushing them
+would publish one machine's node/CPython/git build for no benefit.
+
+```bash
+# once, after the remote exists (the SSH key is already wired)
+git remote add origin git@github.com:<user>/<repo>.git
+git push -u origin main                 # ~37 KiB of objects
+
+# on the target machine
+git clone git@github.com:<user>/<repo>.git ws && cd ws
+tools/bootstrap.sh                      # uv + CPython 3.13/3.12 + node 24.21/26.8 + conda-forge git
+cp config.example.yaml config.yaml && chmod 600 config.yaml   # re-enter keys + identity
+ws-config validate && ws-config git-setup && ws-config ssh-setup
+ws-verify                               # 43 PASS / 0 FAIL once config.yaml is filled in
+```
+
+The rebuild was verified rather than assumed: `git archive HEAD | tar -x` (those 15 files, 92.4 KiB)
+was rebuilt by `tools/bootstrap.sh` into a working toolchain — python 3.13.13, node v24.21.0,
+git 2.55.0, uv 0.11.6 — whose `ws-verify` reported **34 PASS / 1 FAIL / 2 WARN**, the single FAIL
+being the intentionally absent `config.yaml` (the message now says so and points at
+`config.example.yaml`). Network cost per rebuild, pinned versions, no root, no system python:
+uv 23.3 MiB + node 62.6 MiB + micromamba 6.7 MiB + conda-forge git env ≈85 MiB + CPython archives
+≥17 MiB ≈ **0.2–0.3 GiB**.
+
+**Creating** the remote cannot be done from inside the workspace with its current credentials: an
+SSH key can push but never create a repository, and the GitHub API needs a token (`POST /user/repos`
+answers `401 Requires authentication`; `gh` is not installed). Create it in the web UI or with a
+PAT/`gh auth login`; the `git push` above then works as-is.
+
 ## Verification (2026-09-11, Debian 13 · glibc 2.41 · x86_64)
 
-**In place — `ws-verify`: 37 PASS, 0 FAIL, 0 WARN** (full log: `logs/verify-inplace.log`)
+**In place — `ws-verify`: 43 PASS, 0 FAIL, 0 WARN** (full log: `logs/verify-inplace.log`)
 
 - every tool (`python`, `node`, `npm`, `npx`, `git`, `uv`, `ws-config`) resolves *inside* `/workspace`
 - python 3.13.13; `sys.executable` + `sys.prefix` inside the workspace; no host site-packages on `sys.path`
@@ -236,13 +278,18 @@ The tree was copied to a *different, longer* path (`/tmp/tmp.XXXX/ws`), self-hea
 `ws-relocate`, then **moved a second time** (`→ ws-moved`) and every check re-run there:
 
 ```
-copied workspace to /tmp/tmp.XXXX/ws (caches excluded, 374M)
+copied workspace to /tmp/tmp.XXXX/ws (caches excluded, 376M)
 ws-relocate ran cleanly (110 fixes)
-second move (/tmp/tmp.XXXX/ws -> ws-moved) healed (110 fixes)
+second move (/tmp/tmp.XXXX/ws -> ws-moved) healed (109 fixes)
 bundled interpreter runs from the copy (sys.base_prefix)  → inside the copy
 no functional reference to the original root; no dangling symlinks
-re-verification inside the relocated copy: 37 checks passed, 0 failed
+re-verification inside the relocated copy: 43 checks passed, 0 failed
+total: 49 PASS, 0 FAIL, 0 WARN
 ```
+
+The ssh wiring travels with the copy: `activate.sh` notices that the `# root:` line inside
+`config/ssh_config` no longer matches and regenerates it, so `ssh -T git@github.com` still
+authenticates from the relocated tree (part of the 43 checks).
 
 WARNs only ever mean "input still missing": while `git.identity`, `git.credentials[*].ssh_key`
 or `api_keys.*` are empty placeholders the corresponding check is skipped instead of failing.

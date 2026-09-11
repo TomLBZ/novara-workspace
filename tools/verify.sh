@@ -173,11 +173,13 @@ PY
     ws-config validate >/dev/null 2>&1 && ok "ws-config validate OK" || wrn "ws-config validate reported issues (see: ws-config validate)"
     ws-config get git.identity.name >/dev/null 2>&1 && ok "ws-config get works (dot-path reads)" || bad "ws-config get failed"
   else
-    bad "config.yaml missing at workspace root"
+    bad "config.yaml missing at workspace root (fresh clone? cp config.example.yaml config.yaml)"
   fi
 
   sect "7b. LLM settings (config.yaml -> request body)"
-  if ws-config llm --json >/dev/null 2>&1; then
+  if [ ! -f "$WS_ROOT/config.yaml" ]; then
+    wrn "LLM settings skipped: no config.yaml yet (cp config.example.yaml config.yaml)"
+  elif ws-config llm --json >/dev/null 2>&1; then
     local llmchk
     llmchk="$(ws-config llm --request --json 2>/dev/null | python3 -c '
 import json, sys
