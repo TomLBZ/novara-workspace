@@ -1,0 +1,16 @@
+{
+  "id_sources": {
+    "FR": "docs/work/functional-requirements.md",
+    "V": "docs/work/functional-requirements.md",
+    "AC": "docs/work/acceptance-criteria.md",
+    "T": "docs/work/progress-checklist.md"
+  },
+  "adr_dir": "docs/design/adr",
+  "evidence_dir": "docs/work/evidence",
+  "standard_page": "docs/design/12-documentation-standard.md",
+  "scan_extra_files": ["AGENTS.md", "README.md"],
+  "skip_dirs": [".git", "node_modules", "runtime", "venvs", ".venv", "tmp"],
+  "coverage": {"requirement": "FR", "acceptance": "AC"},
+  "exempt_prefixes": [],
+  "placeholder_extra": ["TBD", "TODO-ID"]
+}

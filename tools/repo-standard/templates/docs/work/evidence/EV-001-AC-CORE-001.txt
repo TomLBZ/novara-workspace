@@ -1,0 +1,14 @@
+EV-001 — AC-CORE-001 (documentation gate green)
+date:      @DATE@
+commit:    <fill in: git rev-parse HEAD>
+command:   tools/verify.sh docs
+exit code: 0
+
+--- raw output ---
+== documentation gate ==
+scan: 14 markdown files
+[ok]   IDs: 8 definitions, 12 references, 0 unresolved
+[ok]   placeholders: none
+[ok]   budgets: 9 files checked, highest usage 42% (docs/work/handover.md 431/1024 B)
+[ok]   coverage: 1 requirement(s) all linked to an AC, 0 orphan AC
+RESULT: PASS

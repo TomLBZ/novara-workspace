@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "updated_at": "@DATE@",
+  "phase": "P0",
+  "phase_source": "docs/work/roadmap.md",
+  "next_task": "T-002",
+  "next_action": "replace the seed FR/AC rows with the real requirements, then implement T-003",
+  "last_verified_command": "tools/verify.sh docs",
+  "last_verified_result": "PASS",
+  "last_verified_evidence": "docs/work/evidence/EV-001-AC-CORE-001.txt",
+  "last_verified_commit": "",
+  "blockers": [],
+  "open_questions": [
+    "V-001"
+  ],
+  "recovery_order": [
+    "docs/work/handover.md",
+    ".agents/state.json",
+    "docs/work/progress-checklist.md"
+  ],
+  "rules_file": "AGENTS.md"
+}
