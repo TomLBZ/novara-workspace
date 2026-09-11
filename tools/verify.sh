@@ -230,6 +230,31 @@ print(("ok:" + state) if ok else "MISMATCH:%s" % json.dumps(body))
     bad "ws-config llm failed"
   fi
 
+  sect "8b. agent rules (AGENTS.md)"
+  if [ -f "$WS_ROOT/AGENTS.md" ]; then
+    local agents_size budget
+    agents_size="$(stat -c %s "$WS_ROOT/AGENTS.md")"
+    budget="$(sed -n 's/.*budget:[[:space:]]*\([0-9][0-9]*\) bytes.*/\1/p' "$WS_ROOT/AGENTS.md" | head -1)"
+    budget="${budget:-2048}"
+    if [ "$agents_size" -le "$budget" ]; then
+      ok "AGENTS.md within its own budget ($agents_size <= $budget bytes)"
+    else
+      bad "AGENTS.md is $agents_size bytes, over the declared $budget-byte budget"
+    fi
+    if [ "$(grep -c '^## Rules' "$WS_ROOT/AGENTS.md")" = "1" ] && [ "$(grep -c '^## Maintenance' "$WS_ROOT/AGENTS.md")" = "1" ]; then
+      ok "AGENTS.md keeps its Rules + Maintenance sections"
+    else
+      bad "AGENTS.md lost its '## Rules' / '## Maintenance' heading"
+    fi
+    if [ "$(grep -c '^1\.' "$WS_ROOT/AGENTS.md")" = "1" ]; then
+      ok "AGENTS.md still enumerates its rules"
+    else
+      wrn "AGENTS.md rule list looks altered"
+    fi
+  else
+    wrn "no AGENTS.md - agent rules are not pinned in the repo"
+  fi
+
   sect "8. isolation from the host"
   local leaked
   leaked="$(python -c 'import sys;print(",".join(p for p in sys.path if p.startswith("/usr/lib/python") or p.startswith("/usr/local/lib/python")) or "none")')"

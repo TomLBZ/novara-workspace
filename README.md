@@ -14,6 +14,7 @@ ws-verify --relocate                  # + copy the tree elsewhere, self-heal, re
 
 ```
 /workspace
+├── AGENTS.md                # ← iron rules for agents working here (budget-checked)
 ├── config.yaml              # ← YOUR config: git credentials, identity, API keys (mode 0600)
 ├── config.example.yaml      #   same schema, safe to commit
 ├── bin/
@@ -26,6 +27,7 @@ ws-verify --relocate                  # + copy the tree elsewhere, self-heal, re
 │   ├── wsconfig.py          # config library + CLI backend
 │   ├── relocate.py          # relocation engine
 │   ├── verify.sh            # check suite
+│   ├── llm_probe.py         # one off/on A/B: does the reasoning switch reach the wire?
 │   └── bootstrap.sh         # optional: rebuild runtime/ + venvs/ from scratch
 ├── runtime/                 # all vendored binaries (no host dependency)
 │   ├── uv/bin/uv            #   uv 0.11.6 (static musl)
@@ -40,6 +42,21 @@ ws-verify --relocate                  # + copy the tree elsewhere, self-heal, re
 ├── logs/                    # verify logs etc.
 └── tmp/                     # scratch
 ```
+
+## `AGENTS.md` — where the rules live
+
+`AGENTS.md` in the workspace root holds the short list of iron rules (no backward
+compatibility, no level sweeps for token counts, self-containment, minimal config
+surface, finish a batch by pushing) plus the rules for changing the file itself.
+It is deliberately the **only** place rule text lives: long-term memory keeps a
+one-line pointer to it, README keeps the how-to, skills keep the procedures, and
+duplication is what drifts when context gets compacted.
+
+* the file declares its own hard budget (`<!-- budget: 2048 bytes -->`); `ws-verify`
+  fails when it grows past it or loses its `## Rules` / `## Maintenance` headings
+* it is committed, so every change is a reviewable diff in the history
+* only the user edits it; an agent does so solely with explicit approval in the
+  current session and must state which rule changed and why
 
 ## What is installed
 
@@ -264,7 +281,7 @@ git clone git@github.com:<user>/<repo>.git ws && cd ws
 tools/bootstrap.sh                      # uv + CPython 3.13/3.12 + node 24.21/26.8 + conda-forge git
 cp config.example.yaml config.yaml && chmod 600 config.yaml   # re-enter keys + identity
 ws-config validate && ws-config git-setup && ws-config ssh-setup
-ws-verify                               # 42 PASS / 0 FAIL once config.yaml is filled in
+ws-verify                               # 45 PASS / 0 FAIL once config.yaml is filled in
 ```
 
 The rebuild was verified rather than assumed: `git archive HEAD | tar -x` (those 15 files, 92.4 KiB)
@@ -282,7 +299,7 @@ PAT/`gh auth login`; the `git push` above then works as-is.
 
 ## Verification (2026-09-11, Debian 13 · glibc 2.41 · x86_64)
 
-**In place — `ws-verify`: 42 PASS, 0 FAIL, 0 WARN** (full log: `logs/verify-inplace.log`)
+**In place — `ws-verify`: 45 PASS, 0 FAIL, 0 WARN** (full log: `logs/verify-inplace.log`)
 
 - every tool (`python`, `node`, `npm`, `npx`, `git`, `uv`, `ws-config`) resolves *inside* `/workspace`
 - python 3.13.13; `sys.executable` + `sys.prefix` inside the workspace; no host site-packages on `sys.path`
@@ -303,13 +320,13 @@ ws-relocate ran cleanly (110 fixes)
 second move (/tmp/tmp.XXXX/ws -> ws-moved) healed (109 fixes)
 bundled interpreter runs from the copy (sys.base_prefix)  → inside the copy
 no functional reference to the original root; no dangling symlinks
-re-verification inside the relocated copy: 42 checks passed, 0 failed
-total: 48 PASS, 0 FAIL, 0 WARN
+re-verification inside the relocated copy: 45 checks passed, 0 failed
+total: 51 PASS, 0 FAIL, 0 WARN
 ```
 
 The ssh wiring travels with the copy: `activate.sh` notices that the `# root:` line inside
 `config/ssh_config` no longer matches and regenerates it, so `ssh -T git@github.com` still
-authenticates from the relocated tree (part of the 42 checks).
+authenticates from the relocated tree (part of the 45 checks).
 
 WARNs only ever mean "input still missing": while `git.identity`, `git.credentials[*].ssh_key`
 or `api_keys.*` are empty placeholders the corresponding check is skipped instead of failing.
