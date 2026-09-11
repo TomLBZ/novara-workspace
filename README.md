@@ -399,10 +399,14 @@ or `api_keys.*` are empty placeholders the corresponding check is skipped instea
   `/probe/missing.html` → `404` (status and body passed through)
 - watchdog proven end to end: router killed at `20:36:57Z`, back up at `20:37:49Z` — the
   per-minute cron job restored it in 52 s without any image-side change
-- the public leg was still `502` at test time, and it is **not** the workspace: Nginx Proxy Manager
-  answers its `Default Site` (1033 B) for `Host: novara.remoteblossom.com` on `:80` and rejects that
-  SNI on `:443`, i.e. no proxy host matches the name yet, while Cloudflare's own error page shows it
-  cannot reach its origin at all
+- **public leg live (2026-09-11 21:32Z)**: `https://novara.remoteblossom.com/healthz` → `200` with
+  this workspace's JSON in 0.40 s, `/` → `200` (hello page), `http://` → `301 https`, and the
+  ZeroTier-side name `novara.local.remoteblossom.com` still returns `200` in parallel — the two
+  names coexist because the SNI picks the certificate and the `Host` picks the vhost
+- the public leg failed earlier with an instant `502` (0.025 s), which was **not** the workspace: the
+  cloud proxy sent `Host: novara.remoteblossom.com` while the host's vhost only matched
+  `novara.local.remoteblossom.com`, and an unmatched Host on the host's `:443` is answered by a
+  zero-byte connection close, not a 404
 
 ### Caveat worth knowing
 
