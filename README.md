@@ -39,11 +39,12 @@ ws-verify --relocate                  # + copy the tree elsewhere, self-heal, re
 │   ├── cache/               #   uv / pip / npm caches + offline copies of downloads
 │   └── home/                #   XDG cache/config/data, history — kept inside the workspace
 ├── venvs/py/                # relocatable venv (python 3.13) with base packages
-├── services/                # long-running local services
-│   ├── services.json        #   the manifest: every service ws-gateway keeps alive
-│   ├── gateway/             #   ws-gateway + routes.json (public fan-out by path prefix)
-│   ├── dashboard/           #   ws-dashboard: the ops UI served at /
-│   └── sites/hello/         #   hello-world project, served at /projects/hello
+├── services/                # system-level services (tracked)
+│   ├── services.example.json#   manifest example; the live services.json is machine state
+│   ├── gateway/             #   ws-gateway + routes.example.json (public fan-out by prefix)
+│   └── sites/hello/         #   the hello-world example, served at /projects/hello
+├── projects/                # YOUR projects — each one its own repo, untracked here (rule 7)
+│   └── dashboard/           #   example: ws-dashboard, the ops UI behind /
 ├── projects/                # your work goes here
 ├── logs/                    # verify logs etc.
 └── tmp/                     # scratch
@@ -63,6 +64,23 @@ duplication is what drifts when context gets compacted.
 * it is committed, so every change is a reviewable diff in the history
 * only the user edits it; an agent does so solely with explicit approval in the
   current session and must state which rule changed and why
+
+## Repo scope — environment here, projects in their own repos
+
+`AGENTS.md` **rule 7**: this repo tracks the **portable environment** only.
+
+* **tracked** — `bin/`, `tools/`, `services/gateway/` (the system router), `services/sites/hello/`
+  (the example), the `*.example.json` manifests, and the docs.
+* **untracked, on the bind mount** — `projects/**`, whose members are separate repos, plus
+  `services/services.json` and `services/gateway/routes.json`. That is the same split as
+  `config.yaml` (machine state, gitignored) vs `config.example.yaml` (tracked).
+* **bootstrap** — the first `bin/ws-gateway` run copies `services.example.json` → `services.json`
+  and `routes.example.json` → `routes.json`, so a fresh clone serves the hello example immediately
+  and knows nothing about any project. A manifest entry whose script is missing (project repo not
+  cloned on this machine) shows as `absent` and is skipped by `ensure`, so the watchdog never
+  couples the repo to a project.
+* **adding a project** is two machine-local edits — the service entry in
+  `services/services.json` and its prefix in `services/gateway/routes.json` — and zero edits here.
 
 ## What is installed
 
@@ -279,11 +297,12 @@ to either one. Route matching is longest-prefix; `strip_prefix` decides whether 
 removed before forwarding. After editing `routes.json`, `ws-gateway restart gateway` (the table is
 read at start-up).
 
-**Services.** `services/services.json` is the manifest of everything that must stay up; each entry
+**Services.** The machine-local `services/services.json` (bootstrapped from the tracked example)
+is the manifest of everything that must stay up; each entry
 declares `script`, `probe_ports`, `health` and `log`, and every service implements
 `--healthz PORT` (exit 0 when it answers its health path). `ws-gateway status` shows them all,
 `ws-gateway start|stop|restart [SERVICE ...]` controls one or all, and `ensure` starts whatever is
-down — which is what the cron watchdog calls. `ws-dashboard` (config: `services/dashboard/config.json`)
+down — which is what the cron watchdog calls. `ws-dashboard` (config: `projects/dashboard/config.json`)
 renders services, routes, watchers, container stats and the last requests, and its own `/api/status`
 is the machine-readable version of the same view.
 

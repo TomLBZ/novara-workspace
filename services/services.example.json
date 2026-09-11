@@ -1,0 +1,8 @@
+{
+  "gateway": {
+    "script": "services/gateway/gateway.py",
+    "probe_ports": [80, 8081],
+    "health": "/healthz",
+    "log": "logs/gateway.log"
+  }
+}

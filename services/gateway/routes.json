@@ -1,7 +1,0 @@
-{
-  "listen": [80, 8081],
-  "routes": [
-    { "prefix": "/projects/hello", "type": "static", "root": "services/sites/hello" },
-    { "prefix": "/", "type": "proxy", "upstream": "http://127.0.0.1:8090", "strip_prefix": false }
-  ]
-}
