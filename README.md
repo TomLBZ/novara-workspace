@@ -250,7 +250,11 @@ https://novara.local.remoteblossom.com/` returns this workspace's hello page wit
 `CN=*.local.remoteblossom.com` certificate. **The hop between the two proxies must send
 `SNI = novara.local.remoteblossom.com`**: the host's nginx rejects a handshake for a bare IP or for
 the public name (`unrecognized_name`), and a missing SNI is exactly what surfaces as a 502 at the
-cloud proxy. It must also use `https` upstream (`http` on the host answers `301`).
+cloud proxy. It must also use `https` upstream (`http` on the host answers `301`), and the
+**forwarded `Host` header must match a `server_name` on the host's NPM**: for an unmatched Host the
+host's nginx closes the connection with **zero bytes** (no 404), which surfaces as an instant 502
+(`upstream prematurely closed connection`) at the public proxy — so the public name has to be listed
+on the host's proxy host as well, or the cloud proxy has to send the `.local.` name.
 
 ```bash
 ws-gateway status          # pid, /healthz, listen ports, route table
