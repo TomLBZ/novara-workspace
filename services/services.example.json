@@ -1,8 +1,19 @@
 {
   "gateway": {
     "script": "services/gateway/gateway.py",
-    "probe_ports": [80, 8081],
+    "probe_ports": [
+      80,
+      8081
+    ],
     "health": "/healthz",
     "log": "logs/gateway.log"
+  },
+  "dashboard": {
+    "script": "services/dashboard/dashboard.py",
+    "probe_ports": [
+      8090
+    ],
+    "health": "/api/health",
+    "log": "logs/dashboard.log"
   }
 }

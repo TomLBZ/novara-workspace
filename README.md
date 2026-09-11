@@ -77,8 +77,10 @@ duplication is what drifts when context gets compacted.
   `services/services.json` and `services/gateway/routes.json`. That is the same split as
   `config.yaml` (machine state, gitignored) vs `config.example.yaml` (tracked).
 * **bootstrap** — the first `bin/ws-gateway` run copies `services.example.json` → `services.json`
-  and `routes.example.json` → `routes.json`, so a fresh clone serves the hello example immediately
-  and knows nothing about any project. A manifest entry whose script is missing (project repo not
+  and `routes.example.json` → `routes.json`. Both examples carry the **system-level baseline**
+  (`gateway` + `dashboard`; dashboard at `/`, hello example at `/projects/hello`), so a fresh clone
+  is complete and knows nothing about any project; the live copies equal the examples on a machine
+  that runs only system services. A manifest entry whose script is missing (project repo not
   cloned on this machine) shows as `absent` and is skipped by `ensure`, so the watchdog never
   couples the repo to a project.
 * **adding a project** is two machine-local edits — the service entry in

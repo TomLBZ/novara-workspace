@@ -1,7 +1,20 @@
 {
-  "_comment": "Route schema for ws-gateway. Longest prefix wins; /healthz is reserved by the router. This example is what a fresh clone serves: the hello-world example site.",
-  "listen": [80, 8081],
+  "_comment": "ws-gateway baseline: system services only. Longest prefix wins, /healthz is reserved. Project routes are added machine-locally (this file is gitignored; the live copy came from here).",
+  "listen": [
+    80,
+    8081
+  ],
   "routes": [
-    { "prefix": "/", "type": "static", "root": "services/sites/hello" }
+    {
+      "prefix": "/projects/hello",
+      "type": "static",
+      "root": "services/sites/hello"
+    },
+    {
+      "prefix": "/",
+      "type": "proxy",
+      "upstream": "http://127.0.0.1:8090",
+      "strip_prefix": false
+    }
   ]
 }
