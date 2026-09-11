@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# ---------------------------------------------------------------------------
+# <workspace>/bin/ws-gateway
+#
+# Manage the workspace's L7 path router (services/gateway/gateway.py), the single
+# process Nginx Proxy Manager forwards the public domain to.  Fan-out to local
+# services happens by path prefix in services/gateway/routes.json.
+#
+#   ws-gateway start|stop|restart|status|ensure|routes|logs [-n LINES]
+#
+# `ensure` is the cron-watchdog entry point: it starts the router only when it is
+# not already healthy and stays silent otherwise (so a per-minute job is noise-free).
+# ---------------------------------------------------------------------------
+set -euo pipefail
+
+_ws_self="${BASH_SOURCE[0]:-$0}"
+WS_ROOT="$(cd -P "$(dirname "$_ws_self")/.." && pwd)"
+GATEWAY="$WS_ROOT/services/gateway/gateway.py"
+PID_FILE="$WS_ROOT/runtime/run/ws-gateway.pid"
+LOG_FILE="$WS_ROOT/logs/gateway.log"
+mkdir -p "$WS_ROOT/runtime/run" "$WS_ROOT/logs"
+
+# prefer the workspace venv python, fall back to whatever python is on PATH
+PY="$WS_ROOT/venvs/py/bin/python"
+[ -x "$PY" ] || PY="$(command -v python3 || command -v python)"
+
+ports() { python3 -c "import json,sys;print(' '.join(str(p) for p in json.load(open('$WS_ROOT/services/gateway/routes.json'))['listen']))"; }
+alive() { [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; }
+healthy() {
+  local p
+  for p in $(ports); do
+    "$PY" "$GATEWAY" --healthz "$p" 2>/dev/null && return 0
+  done
+  return 1
+}
+
+start() {
+  if healthy; then echo "ws-gateway already healthy (pid $(cat "$PID_FILE" 2>/dev/null))"; return 0; fi
+  if alive; then echo "ws-gateway process $(cat "$PID_FILE") is up but not answering /healthz - restarting"; stop >/dev/null; fi
+  echo "ws-gateway: starting ($PY) ports: $(ports)" | tee -a "$LOG_FILE"
+  setsid nohup "$PY" "$GATEWAY" >>"$LOG_FILE" 2>&1 < /dev/null &
+  for _ in $(seq 1 25); do sleep 0.2; healthy && { echo "ws-gateway: up (pid $(cat "$PID_FILE"))"; return 0; }; done
+  echo "ws-gateway: FAILED to come up - see $LOG_FILE" >&2; return 1
+}
+
+stop() {
+  if alive; then
+    pid="$(cat "$PID_FILE")"; kill "$pid" 2>/dev/null || true
+    for _ in $(seq 1 25); do kill -0 "$pid" 2>/dev/null || break; sleep 0.2; done
+    kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+    rm -f "$PID_FILE"; echo "ws-gateway: stopped ($pid)"
+  else
+    rm -f "$PID_FILE"; echo "ws-gateway: not running"
+  fi
+}
+
+ensure() {
+  if healthy; then exit 0; fi
+  start >>"$LOG_FILE" 2>&1 && echo "ws-gateway: watchdog restarted the router (see $LOG_FILE)"
+  exit 0
+}
+
+status() {
+  printf 'pid file : %s\n' "$PID_FILE"
+  printf 'process  : %s\n' "$(alive && cat "$PID_FILE" || echo 'not running')"
+  printf 'healthz  : %s\n' "$(healthy && echo ok || echo 'unreachable')"
+  printf 'ports    : %s\n' "$(ports)"
+  printf 'log      : %s\n' "$LOG_FILE"
+  printf 'routes   :\n'
+  python3 -c "import json;[print('  %-14s %-6s %s' % (r.get('prefix'), r['type'], r.get('root') or r.get('upstream'))) for r in json.load(open('$WS_ROOT/services/gateway/routes.json'))['routes']]"
+}
+
+case "${1:-status}" in
+  start)   start ;;
+  stop)    stop ;;
+  restart) stop; start ;;
+  ensure)  ensure ;;
+  status)  status ;;
+  routes)  python3 -c "import json;print(json.dumps(json.load(open('$WS_ROOT/services/gateway/routes.json')),indent=2))" ;;
+  logs)    shift || true; tail -n "${2:-40}" "$LOG_FILE" ;;
+  *) echo "usage: ws-gateway {start|stop|restart|status|ensure|routes|logs [N]}" >&2; exit 2 ;;
+esac

@@ -1,0 +1,6 @@
+{
+  "listen": [80, 8081],
+  "routes": [
+    { "prefix": "/", "type": "static", "root": "services/sites/hello" }
+  ]
+}

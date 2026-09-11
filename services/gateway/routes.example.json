@@ -1,0 +1,11 @@
+{
+  "_comment": "Route schema for ws-gateway. Copy the shapes you need into routes.json.",
+  "listen": [80, 8081],
+  "routes": [
+    { "prefix": "/",        "type": "static", "root": "services/sites/hello" },
+    { "prefix": "/hello",   "type": "static", "root": "services/sites/hello" },
+    { "prefix": "/dash",    "type": "proxy",  "upstream": "http://127.0.0.1:30533", "strip_prefix": true },
+    { "prefix": "/api",     "type": "proxy",  "upstream": "http://127.0.0.1:30532", "strip_prefix": true },
+    { "prefix": "/app",     "type": "proxy",  "upstream": "http://127.0.0.1:8082",  "strip_prefix": false }
+  ]
+}
