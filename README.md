@@ -376,6 +376,20 @@ WARNs only ever mean "input still missing": while `git.identity`, `git.credentia
 or `api_keys.*` are empty placeholders the corresponding check is skipped instead of failing.
 `ws-config validate` lists what is outstanding; fill it in and the WARNs disappear.
 
+**Public egress — `ws-gateway` behind nginx-proxy-manager** (2026-09-11)
+
+- the router serves the hello site on `:80` *and* `:8081` inside the container:
+  `curl -H 'Host: novara.remoteblossom.com' http://<container-ip>/` → `200`
+  (`<title>Hello from the Hermes workspace</title>`), `/healthz` → `{"status": "ok"}`
+- proxy branch verified against a throwaway upstream on `127.0.0.1:8099`: `/probe/` → `200`,
+  `/probe/missing.html` → `404` (status and body passed through)
+- watchdog proven end to end: router killed at `20:36:57Z`, back up at `20:37:49Z` — the
+  per-minute cron job restored it in 52 s without any image-side change
+- the public leg was still `502` at test time, and it is **not** the workspace: Nginx Proxy Manager
+  answers its `Default Site` (1033 B) for `Host: novara.remoteblossom.com` on `:80` and rejects that
+  SNI on `:443`, i.e. no proxy host matches the name yet, while Cloudflare's own error page shows it
+  cannot reach its origin at all
+
 ### Caveat worth knowing
 
 Binary files in the bundled git have the install prefix compiled in. `ws-relocate` rewrites them
