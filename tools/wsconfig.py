@@ -41,15 +41,21 @@ except ImportError:  # pragma: no cover
 
 SECRET_HINTS = ("token", "key", "password", "secret", "value", "pass", "webhook")
 
-#: effort levels understood by the schema; each provider maps them to its own
-#: vocabulary (see api_keys.<provider>.reasoning.levels).
-LLM_EFFORTS = ("minimal", "low", "medium", "high")
+#: The one reasoning knob is `reasoning_effort`.  Values are compared against
+#: the provider's supported list; these are the generic levels, weakest first,
+#: used to snap a request down to the nearest supported one (xhigh/ultra/...).
+LLM_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "ultra")
+#: reasoning_effort values (or absent/empty) that mean "do not think at all"
+LLM_EFFORT_OFF = (None, "", "none", "null", "off", "false", "disabled")
 LLM_KINDS = ("openai-compatible", "anthropic", "gemini")
 
-#: `on:`/`off:` are YAML 1.1 booleans, so a hand-edited config can silently end
-#: up with a `True`/`False` key. Accept every spelling rather than failing.
-_ON_KEYS = ("on_value", "on", True, "true", "yes")
-_OFF_KEYS = ("off_value", "off", False, "false", "no")
+#: openai-compatible convention, measured against the live DeepSeek endpoint;
+#: a provider block overrides these when its API spells things differently.
+DEFAULT_EFFORT_PARAM = "reasoning_effort"
+DEFAULT_DISABLED_BODY = {"thinking": {"type": "disabled"}}
+#: obsolete per-provider keys, rejected by `ws-config validate`
+_LEGACY_REASONING_KEYS = ("on_value", "off_value", "on", "off", "effort_param",
+                          "levels", "verified", "effort_verified")
 
 
 def workspace_root() -> Path:
@@ -116,35 +122,56 @@ def is_placeholder(value) -> bool:
     return value is None
 
 
-def _nested_set(body: dict, dotted: str, value) -> None:
-    """body["thinking"]["type"] = value for dotted="thinking.type"."""
-    parts = [p for p in str(dotted).split(".") if p]
-    if not parts:
-        return
-    cur = body
-    for part in parts[:-1]:
-        nxt = cur.get(part)
-        if not isinstance(nxt, dict):
-            nxt = {}
-            cur[part] = nxt
-        cur = nxt
-    cur[parts[-1]] = value
+def effort_state(raw=None, supported=None, mapping=None, param=None,
+                 disabled_body=None) -> dict:
+    """Resolve one ``reasoning_effort`` value into what goes on the wire.
 
-
-def _pick(mapping: dict, keys) -> object:
-    for k in keys:
-        if k in mapping:
-            return mapping[k]
-    return None
+    ``none`` / ``null`` / empty / an absent key -> reasoning off: the provider's
+    ``disabled_body`` is sent instead of the effort field.  Anything else is sent
+    verbatim when the provider lists it as supported, mapped through ``map``, or
+    snapped down to the nearest supported level, so levels a provider does not
+    have (xhigh, ultra, ...) still work instead of being rejected.
+    """
+    supported_l = [str(x).strip().lower() for x in (supported or [])]
+    mapping_l = {str(k).strip().lower(): str(v).strip() for k, v in (mapping or {}).items()}
+    if disabled_body is None:
+        body_off: dict = {}
+    elif isinstance(disabled_body, dict):
+        body_off = disabled_body
+    else:
+        body_off = dict(DEFAULT_DISABLED_BODY)
+    state = {"param": str(param).strip() if param else DEFAULT_EFFORT_PARAM,
+             "disabled_body": body_off, "supported": supported_l, "raw": raw,
+             "enabled": False, "level": None, "value": None,
+             "mapped_from": None, "unknown": False}
+    if raw is None or (isinstance(raw, str) and raw.strip().lower() in LLM_EFFORT_OFF):
+        return state
+    value = str(raw).strip().lower()
+    state["enabled"] = True
+    if not supported_l or value in supported_l:
+        state.update(level=value, value=value)
+        return state
+    if value in mapping_l:
+        state.update(level=value, value=mapping_l[value], mapped_from=value)
+        return state
+    ranked = [x for x in supported_l if x in LLM_EFFORT_ORDER]
+    weakest = ranked[0] if ranked else supported_l[0]
+    if value not in LLM_EFFORT_ORDER:
+        state.update(level=value, value=weakest, unknown=True)
+        return state
+    cut = LLM_EFFORT_ORDER.index(value)
+    below = [x for x in ranked if LLM_EFFORT_ORDER.index(x) <= cut]
+    state.update(level=value, value=(below[-1] if below else weakest), mapped_from=value)
+    return state
 
 
 def llm_settings(provider: str | None = None, model: str | None = None,
-                 data: dict | None = None) -> dict:
+                 effort: str | None = None, data: dict | None = None) -> dict:
     """Resolve the effective LLM settings from config.yaml.
 
-    Precedence: explicit argument > llm.* (global) > api_keys.<provider>.*.
-    Returns a plain dict, safe to print (the secret itself is never included,
-    only ``api_key_set``).
+    Precedence: explicit argument > api_keys.<provider>.reasoning_effort >
+    llm.reasoning_effort.  Returns a plain dict, safe to print (the secret
+    itself is never included, only ``api_key_set``).
     """
     data = data if data is not None else load()
     llm = get(data, "llm", {}) or {}
@@ -153,34 +180,19 @@ def llm_settings(provider: str | None = None, model: str | None = None,
     if not isinstance(entry, dict):
         entry = {}
     has_key = bool(entry.get("value")) and not is_placeholder(entry.get("value"))
-    models = []
-    for m in entry.get("models") or []:
-        models.append(m.get("id") if isinstance(m, dict) else str(m))
+    models = [m.get("id") if isinstance(m, dict) else str(m) for m in (entry.get("models") or [])]
     chosen = (model or get(llm, "model") or entry.get("default_model") or
               (models[0] if models else ""))
-    reasoning = {}
-    pr = entry.get("reasoning") or {}
-    gr = get(llm, "reasoning", {}) or {}
-    if isinstance(pr, dict) and (pr.get("param") or pr.get("effort_param")):
-        enabled = gr.get("enabled")
-        enabled = True if enabled is None else bool(enabled)
-        level = gr.get("effort") or "medium"
-        levels = pr.get("levels") or {}
-        reasoning = {
-            "supported": True,
-            "verified": bool(pr.get("verified")),
-            "enabled": enabled,
-            "effort": level,
-            "effort_verified": bool(pr.get("effort_verified")),
-            "param": pr.get("param"),
-            "on": _pick(pr, _ON_KEYS),
-            "off": _pick(pr, _OFF_KEYS),
-            "effort_param": pr.get("effort_param"),
-            "effort_value": levels.get(level, level) if isinstance(levels, dict) else level,
-            "levels": dict(levels) if isinstance(levels, dict) else {},
-        }
+    rb = entry.get("reasoning") if isinstance(entry.get("reasoning"), dict) else {}
+    if effort is not None:
+        raw_effort = effort
+    elif "reasoning_effort" in entry:
+        raw_effort = entry.get("reasoning_effort")
     else:
-        reasoning = {"supported": False, "enabled": False}
+        raw_effort = llm.get("reasoning_effort")
+    reasoning = effort_state(raw_effort, rb.get("supported"), rb.get("map"),
+                             rb.get("param"),
+                             rb.get("disabled_body", DEFAULT_DISABLED_BODY))
     req = dict(get(llm, "request", {}) or {})
     req.update(entry.get("options") or {})
     extra = dict(get(llm, "extra_body", {}) or {})
@@ -202,10 +214,10 @@ def llm_settings(provider: str | None = None, model: str | None = None,
 
 def build_chat_request(messages, settings: dict | None = None, *,
                        stream: bool = False, model: str | None = None) -> dict:
-    """Chat-completions body for ``settings`` (reasoning knobs included).
+    """Chat-completions body for ``settings``, reasoning included.
 
-    The parameter names come from config.yaml, so a provider whose API spells
-    "thinking" differently only needs a config edit — no code change.
+    Reasoning is one knob: ``reasoning_effort``.  Off means the provider's
+    disabled body is sent, on means one effort field with a supported value.
     """
     st = settings or llm_settings()
     body: dict = {"model": model or st.get("model"), "messages": messages,
@@ -215,17 +227,17 @@ def build_chat_request(messages, settings: dict | None = None, *,
             continue
         body[key] = value
     r = st.get("reasoning") or {}
-    if r.get("supported") and r.get("param"):
-        _nested_set(body, r["param"], r["on"] if r.get("enabled") else r.get("off"))
-        if r.get("enabled") and r.get("effort_param"):
-            body[r["effort_param"]] = r.get("effort_value")
+    if r.get("enabled"):
+        body[r.get("param") or DEFAULT_EFFORT_PARAM] = r.get("value")
+    else:
+        body.update(r.get("disabled_body") or {})
     body.update(st.get("extra_body") or {})
     return body
 
 
 def cmd_llm(args) -> int:
     """Print the resolved model / reasoning settings."""
-    st = llm_settings(provider=args.provider, model=args.model)
+    st = llm_settings(provider=args.provider, model=args.model, effort=args.effort)
     if args.json or args.request:
         payload = {"settings": st}
         if args.request:
@@ -243,15 +255,16 @@ def cmd_llm(args) -> int:
         print(f"models       : {', '.join(str(m) for m in st['models'])}")
     if st["fallbacks"]:
         print(f"fallbacks    : {', '.join(str(f) for f in st['fallbacks'])}")
-    if r.get("supported"):
-        tag = "verified" if r.get("verified") else "UNVERIFIED"
-        print(f"reasoning    : {'on' if r['enabled'] else 'off'}  "
-              f"effort={r['effort']} -> {r['param']}={r['on'] if r['enabled'] else r['off']}"
-              f"{' + ' + str(r['effort_param']) + '=' + str(r['effort_value']) if r['enabled'] and r['effort_param'] else ''}")
-        print(f"               switch {tag}; effort control "
-              f"{'verified' if r.get('effort_verified') else 'accepted but not proven'}")
+    if r.get("enabled"):
+        detail = f"{r['param']}={r['value']}"
+        if r.get("mapped_from") and r["mapped_from"] != r["value"]:
+            detail += f"   ({r['mapped_from']} -> {r['value']}: nearest supported level)"
+        if r.get("unknown"):
+            detail += f"   (UNKNOWN level '{r['level']}' - supported: {r['supported']})"
+        print(f"reasoning    : on   {detail}")
     else:
-        print("reasoning    : not modelled for this provider (no reasoning.param)")
+        sent = json.dumps(r.get("disabled_body") or {}, ensure_ascii=False)
+        print(f"reasoning    : off   (value {r.get('raw')!r} -> sends {sent})")
     print(f"request      : {json.dumps(st['request'], ensure_ascii=False)}")
     if st["extra_body"]:
         print(f"extra_body   : {json.dumps(st['extra_body'], ensure_ascii=False)}")
@@ -300,8 +313,10 @@ def _export_lines(only: set[str] | None = None) -> list[str]:
         out += [
             f"export LLM_PROVIDER={shlex.quote(st['provider'])}",
             f"export LLM_MODEL={shlex.quote(str(st['model'] or ''))}",
-            f"export LLM_REASONING_ENABLED={shlex.quote('1' if r.get('enabled') else '0')}",
-            f"export LLM_REASONING_EFFORT={shlex.quote(str(r.get('effort') or ''))}",
+            f"export LLM_REASONING_EFFORT="
+            f"{shlex.quote('none' if not r.get('enabled') else str(r.get('value')))}",
+            f"export LLM_REASONING_LEVEL="
+            f"{shlex.quote(str(r.get('value') or ''))}",
         ]
         req = st.get("request") or {}
         if req.get("timeout_s") is not None:
@@ -451,6 +466,7 @@ def cmd_validate(args) -> int:
     data = load()
     problems: list[str] = []
     pending: list[str] = []
+    notes: list[str] = []
     if not isinstance(data, dict) or not data.get("meta"):
         problems.append("missing top-level `meta` section")
     for name, entry in (get(data, "api_keys", {}) or {}).items():
@@ -483,14 +499,14 @@ def cmd_validate(args) -> int:
     for i, fb in enumerate(get(llm, "fallbacks", []) or []):
         if fb not in (get(data, "api_keys", {}) or {}):
             problems.append(f"llm.fallbacks[{i}] '{fb}' is not a key of api_keys")
-    rl = get(llm, "reasoning", {}) or {}
-    if not isinstance(rl, dict):
-        problems.append("llm.reasoning must be a mapping")
-    else:
-        if rl.get("effort") not in (None, *LLM_EFFORTS):
-            problems.append(f"llm.reasoning.effort '{rl['effort']}' not in {list(LLM_EFFORTS)}")
-        if "enabled" in rl and not isinstance(rl["enabled"], bool):
-            problems.append("llm.reasoning.enabled must be true/false")
+    if "reasoning" in llm:
+        problems.append(
+            "llm.reasoning is obsolete: the single knob is llm.reasoning_effort "
+            "(none|null|'' disables thinking, otherwise a level such as medium)")
+    effort_raw = llm.get("reasoning_effort")
+    if effort_raw is not None and not isinstance(effort_raw, str):
+        problems.append("llm.reasoning_effort must be a string (none|minimal|low|medium|high|...) "
+                        "or null/empty to disable thinking")
     req = get(llm, "request", {}) or {}
     if not isinstance(req, dict):
         problems.append("llm.request must be a mapping")
@@ -510,28 +526,53 @@ def cmd_validate(args) -> int:
             problems.append(f"api_keys.{name}.default_model '{dm}' not listed in .models {ids}")
         if ids and not dm:
             pending.append(f"api_keys.{name}.default_model")
-        r = entry.get("reasoning") or {}
-        if isinstance(r, dict) and r:
-            if not r.get("param"):
-                problems.append(f"api_keys.{name}.reasoning needs `param` (e.g. thinking.type)")
-            elif "." not in str(r.get("param")):
+        if "reasoning_effort" in entry and entry["reasoning_effort"] is not None                 and not isinstance(entry["reasoning_effort"], str):
+            problems.append(f"api_keys.{name}.reasoning_effort must be a string or null")
+        rb = entry.get("reasoning")
+        if rb is not None and not isinstance(rb, dict):
+            problems.append(f"api_keys.{name}.reasoning must be a mapping "
+                            "(param / supported / map / disabled_body)")
+            continue
+        rb = rb or {}
+        legacy = [k for k in _LEGACY_REASONING_KEYS if k in rb]
+        if legacy:
+            problems.append(
+                f"api_keys.{name}.reasoning.{legacy[0]} is obsolete - a provider block only "
+                "needs param / supported / map / disabled_body")
+        if "param" in rb and not isinstance(rb["param"], str):
+            problems.append(f"api_keys.{name}.reasoning.param must be a string")
+        if "supported" in rb and not isinstance(rb["supported"], list):
+            problems.append(f"api_keys.{name}.reasoning.supported must be a list of levels")
+        if "map" in rb and not isinstance(rb["map"], dict):
+            problems.append(f"api_keys.{name}.reasoning.map must be a mapping level -> provider value")
+        if rb.get("disabled_body") is not None and not isinstance(rb.get("disabled_body"), dict):
+            problems.append(f"api_keys.{name}.reasoning.disabled_body must be a mapping or null")
+        if name == prov:
+            provider_effort = entry["reasoning_effort"] if "reasoning_effort" in entry else effort_raw
+            state = effort_state(provider_effort, rb.get("supported"), rb.get("map"),
+                                 rb.get("param"),
+                                 rb.get("disabled_body", DEFAULT_DISABLED_BODY))
+            if state["unknown"]:
                 problems.append(
-                    f"api_keys.{name}.reasoning.param '{r.get('param')}' should be dotted, "
-                    "e.g. thinking.type or enable_thinking")
-            if _pick(r, _ON_KEYS) is None or _pick(r, _OFF_KEYS) is None:
-                problems.append(
-                    f"api_keys.{name}.reasoning needs both `on_value` and `off_value` "
-                    "(quote them: bare `on:`/`off:` are booleans in YAML 1.1)")
-            if r.get("param") and not r.get("verified"):
-                pending.append(
-                    f"api_keys.{name}.reasoning.verified (switch accepted by the live API but "
-                    "never measured - run tools/llm_probe.py)")
+                    f"reasoning_effort '{state['level']}' is not a known level and not in "
+                    f"api_keys.{name}.reasoning.supported {state['supported']}")
+            elif state["mapped_from"]:
+                notes.append(f"reasoning_effort={state['mapped_from']} -> {state['value']} "
+                             f"(nearest level supported by {name})")
+            if not rb.get("supported"):
+                notes.append(f"api_keys.{name}.reasoning.supported is empty - reasoning_effort "
+                             "values are sent as-is (add the supported list to get validation "
+                             "and mapping)")
     if problems:
         print("INVALID:")
         for p in problems:
             print(f"  - {p}")
     else:
         print("config.yaml: structure OK")
+    if notes:
+        print(f"info ({len(notes)}):")
+        for n in notes:
+            print(f"  - {n}")
     if pending:
         print(f"empty / placeholder values ({len(pending)}) - fill in when available:")
         for p in pending:
@@ -567,6 +608,7 @@ def main(argv=None) -> int:
     p = sub.add_parser("llm", help="resolved provider / model / reasoning settings")
     p.add_argument("--provider", help="override llm.provider")
     p.add_argument("--model", help="override the model id")
+    p.add_argument("--effort", help="override reasoning_effort (none disables thinking)")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--request", action="store_true", help="also show the request body template")
     p.set_defaults(func=cmd_llm)

@@ -87,7 +87,7 @@ llm:                 # which provider/model agents use, and how they reason
   provider: deepseek
   model: ""          # overrides api_keys.<provider>.default_model
   request:  { temperature: null, max_tokens: null, top_p: null, timeout_s: 300, retries: 2 }
-  reasoning: { enabled: true, effort: medium, keep_trace: false }
+  reasoning_effort: medium                  # THE reasoning knob (see below)
   extra_body: {}
 api_keys:
   deepseek:
@@ -97,13 +97,12 @@ api_keys:
     kind: openai-compatible                  # request shape
     default_model: deepseek-flash            # used unless llm.model overrides it
     models: [{ id: deepseek-flash }, { id: deepseek-v4-pro }]
-    reasoning:                               # how this provider spells thinking/depth
-      param: thinking.type
-      on_value: enabled
-      off_value: disabled
-      effort_param: reasoning_effort
-      effort_verified: true
-      levels: { minimal: minimal, low: low, medium: medium, high: high }
+    reasoning_effort: medium                 # this provider's default level
+    reasoning:                               # protocol details, not a knob
+      supported: [minimal, low, medium, high]  # levels this API really honours
+      # param: reasoning_effort              # request field name (default: the same)
+      # map: { xhigh: high }                 # explicit mapping (default: snap down)
+      # disabled_body: { thinking: { type: disabled } }   # sent when effort is none/empty
     options: {}                              # per-provider request overrides
     extra_body: {}                           # verbatim extra JSON (escape hatch)
   openai: { value: "", env: OPENAI_API_KEY, base_url: "", kind: openai-compatible }
@@ -120,7 +119,8 @@ ws-config get api_keys.openai.value --reveal
 ws-config git-setup                      # fill git.credentials → writes config/git-credentials (0600)
                                          #   + config/gitconfig (identity, store helper) — re-run after edits
 ws-config ssh-setup                      # git.credentials[*].ssh_key → config/ssh_config (workspace-local paths)
-ws-config llm [--json] [--request]       # resolved model / reasoning settings + request body
+ws-config llm [--json] [--request]       # resolved model / reasoning_effort + request body
+ws-config llm --effort none              # override the knob for one query (none = no thinking)
 eval "$(ws-config export)"               # export every non-empty api key / secret
 ws-config env-file .env                  # or write a chmod-600 .env
 python -c "from wsconfig import load, get; print(get(load(),'api_keys.openai.env'))"
@@ -136,34 +136,48 @@ cannot be committed by accident.
 think" is decided; no code holds a model name.
 
 ```bash
-ws-config llm                       # provider, model, reasoning switch/depth, request options
-ws-config llm --request             # the exact chat-completions body that would be sent
-ws-config export                    # also emits LLM_PROVIDER / LLM_MODEL /
-                                    # LLM_REASONING_ENABLED / LLM_REASONING_EFFORT / LLM_TIMEOUT_S
+ws-config llm                        # provider, model, reasoning_effort, request options
+ws-config llm --effort none          # override for one query: thinking off
+ws-config llm --effort xhigh         # shows the value that will really be sent
+ws-config llm --request              # the exact chat-completions body that would be sent
+ws-config export                     # also emits LLM_PROVIDER / LLM_MODEL /
+                                     # LLM_REASONING_EFFORT / LLM_REASONING_LEVEL / LLM_TIMEOUT_S
 python -c "from wsconfig import llm_settings, build_chat_request; \
            print(build_chat_request([{'role':'user','content':'hi'}], llm_settings()))"
-python tools/llm_probe.py --quick   # live check that the thinking switch really does something
+python tools/llm_probe.py --quick    # live check that reasoning_effort=none really stops thinking
 ```
 
-Precedence is *argument → `llm.*` → `api_keys.<provider>.*`, and the provider
-parameter names are **data, not code**: a provider that spells thinking as
-`enable_thinking` or `chat_template_kwargs.thinking` needs a config edit only.
+**There is exactly one reasoning knob: `reasoning_effort`.**
+
+| value | effect on the wire |
+|---|---|
+| `none` / `null` / empty / key absent | thinking off - the provider's `disabled_body` is sent instead |
+| a level the provider supports (`minimal`, `low`, `medium`, `high`) | sent verbatim as `reasoning_effort` |
+| a level it does not support (`xhigh`, `ultra`, ...) | snapped down to the nearest supported level (`--effort xhigh` → `reasoning_effort=high`) |
+| an unknown word | falls back to the weakest supported level and `ws-config validate` reports it |
+
+Precedence is *`--effort` argument → `api_keys.<provider>.reasoning_effort` →
+`llm.reasoning_effort`*. The provider block holds only protocol details
+(`supported` levels, optional `param` / `map` / `disabled_body`), so an API that
+spells it differently is a config edit, not a code change.
 
 **Verified, not assumed.** This endpoint accepts *any* unknown JSON field with
 HTTP 200 (a junk parameter returns success), so "the request was accepted" proves
 nothing. The values shipped in `config.yaml` were measured against the live API
 (`tools/llm_probe.py`, evidence in `logs/llm-probe-*.json`):
 
-* `thinking.type=disabled` → no `reasoning_content`, `reasoning_tokens: null` — **proven**
-* `reasoning_effort=minimal|low` → ≈4.6k reasoning tokens, `medium|high` → ≈11k (2.4×) — **measured**
-  (medium vs high are not separable at n=1–2 samples)
+* effort off (`reasoning_effort: none` → `thinking.type=disabled`) → no `reasoning_content`,
+  `reasoning_tokens: null` — **proven, re-checked end to end through `build_chat_request`**
+* the levels are real and monotonic (one run each, `max_tokens=32k`): `minimal` ≈5.2k, `low` ≈6.9k,
+  `medium` ≈12.7k, `high` ≈18.4k reasoning tokens — **measured**; `xhigh`/`ultra` are not extra
+  levels here and snap to `high`. Measuring at a low `max_tokens` clips every strong level at the
+  cap, which is what makes medium and high look identical — lift the cap before comparing
 * `thinking.budget_tokens`, `enable_thinking`, `chat_template_kwargs` → accepted but **silently
   ignored**; do not rely on them
 * model ids: `deepseek-flash`, `deepseek-v4-pro`; anything else is rejected with HTTP 400
 
-`reasoning.verified` / `effort_verified` in `config.yaml` record that status, and
-`ws-config validate` keeps nagging about a reasoning block that was never measured
-until it is confirmed or removed.
+`api_keys.<provider>.reasoning.supported` is the measured list, so `ws-config validate`
+catches a level the API does not have (or an unknown word) instead of sending it and hoping.
 
 ### Git over SSH (no token needed)
 
@@ -244,7 +258,7 @@ git clone git@github.com:<user>/<repo>.git ws && cd ws
 tools/bootstrap.sh                      # uv + CPython 3.13/3.12 + node 24.21/26.8 + conda-forge git
 cp config.example.yaml config.yaml && chmod 600 config.yaml   # re-enter keys + identity
 ws-config validate && ws-config git-setup && ws-config ssh-setup
-ws-verify                               # 43 PASS / 0 FAIL once config.yaml is filled in
+ws-verify                               # 42 PASS / 0 FAIL once config.yaml is filled in
 ```
 
 The rebuild was verified rather than assumed: `git archive HEAD | tar -x` (those 15 files, 92.4 KiB)
@@ -262,7 +276,7 @@ PAT/`gh auth login`; the `git push` above then works as-is.
 
 ## Verification (2026-09-11, Debian 13 · glibc 2.41 · x86_64)
 
-**In place — `ws-verify`: 43 PASS, 0 FAIL, 0 WARN** (full log: `logs/verify-inplace.log`)
+**In place — `ws-verify`: 42 PASS, 0 FAIL, 0 WARN** (full log: `logs/verify-inplace.log`)
 
 - every tool (`python`, `node`, `npm`, `npx`, `git`, `uv`, `ws-config`) resolves *inside* `/workspace`
 - python 3.13.13; `sys.executable` + `sys.prefix` inside the workspace; no host site-packages on `sys.path`
@@ -283,13 +297,13 @@ ws-relocate ran cleanly (110 fixes)
 second move (/tmp/tmp.XXXX/ws -> ws-moved) healed (109 fixes)
 bundled interpreter runs from the copy (sys.base_prefix)  → inside the copy
 no functional reference to the original root; no dangling symlinks
-re-verification inside the relocated copy: 43 checks passed, 0 failed
-total: 49 PASS, 0 FAIL, 0 WARN
+re-verification inside the relocated copy: 42 checks passed, 0 failed
+total: 48 PASS, 0 FAIL, 0 WARN
 ```
 
 The ssh wiring travels with the copy: `activate.sh` notices that the `# root:` line inside
 `config/ssh_config` no longer matches and regenerates it, so `ssh -T git@github.com` still
-authenticates from the relocated tree (part of the 43 checks).
+authenticates from the relocated tree (part of the 42 checks).
 
 WARNs only ever mean "input still missing": while `git.identity`, `git.credentials[*].ssh_key`
 or `api_keys.*` are empty placeholders the corresponding check is skipped instead of failing.

@@ -187,39 +187,42 @@ d = json.load(sys.stdin)
 st = d["settings"]; r = st.get("reasoning") or {}; body = d.get("request_body") or {}
 if not st.get("model"):
     print("NO_MODEL"); raise SystemExit
-if not r.get("supported"):
-    print("not-modelled:" + str(st.get("provider"))); raise SystemExit
-def dig(doc, path):
-    for part in str(path).split("."):
-        doc = doc.get(part) if isinstance(doc, dict) else None
-    return doc
-want = r["on"] if r.get("enabled") else r["off"]
-got = dig(body, r["param"])
-ok = (got == want)
-if r.get("enabled") and r.get("effort_param"):
-    ok = ok and body.get(r["effort_param"]) == r.get("effort_value")
-print("ok:%s:%s" % (st["model"], "on" if r.get("enabled") else "off") if ok
-      else "MISMATCH:%s=%r want %r" % (r["param"], got, want))
+def subset(doc, want):
+    for k, v in (want or {}).items():
+        if isinstance(v, dict):
+            if not isinstance(doc.get(k), dict) or not subset(doc[k], v):
+                return False
+        elif doc.get(k) != v:
+            return False
+    return True
+if r.get("enabled"):
+    if r.get("unknown"):
+        print("UNKNOWN:%s" % r.get("level")); raise SystemExit
+    if r.get("supported") and r.get("value") not in r["supported"]:
+        print("SNAP_MISS:%s" % r.get("value")); raise SystemExit
+    ok = body.get(r.get("param")) == r.get("value")
+    state = "on:%s=%s%s" % (r.get("param"), r.get("value"),
+                            " (%s->%s)" % (r.get("mapped_from"), r.get("value"))
+                            if r.get("mapped_from") else "")
+else:
+    ok = subset(body, r.get("disabled_body")) and r.get("param") not in body
+    state = "off:%s" % json.dumps(r.get("disabled_body") or {}, ensure_ascii=False)
+print(("ok:" + state) if ok else "MISMATCH:%s" % json.dumps(body))
 ' 2>/dev/null)"
     case "$llmchk" in
-      ok:*) ok "llm settings produce the expected request body (${llmchk#ok:})" ;;
-      not-modelled:*) wrn "no reasoning block for provider '${llmchk#not-modelled:}' - switch not modelled" ;;
+      ok:on:*) ok "reasoning on - request body carries ${llmchk#ok:on:}" ;;
+      ok:off:*) ok "reasoning off - request body carries ${llmchk#ok:off:}" ;;
+      UNKNOWN:*) bad "reasoning_effort '${llmchk#UNKNOWN:}' is unknown and not mappable" ;;
+      SNAP_MISS:*) bad "reasoning level '${llmchk#SNAP_MISS:}' is not supported by the provider" ;;
       NO_MODEL) wrn "llm settings incomplete: no model selected (config.yaml -> llm.model)" ;;
       "") bad "ws-config llm --request produced nothing" ;;
       *) bad "llm request body $llmchk" ;;
-    esac
-    local effort
-    effort="$(ws-config get llm.reasoning.effort 2>/dev/null || true)"
-    case "$effort" in
-      minimal|low|medium|high) ok "reasoning effort '$effort' is a known level" ;;
-      "") wrn "llm.reasoning.effort unset" ;;
-      *) bad "llm.reasoning.effort '$effort' not in minimal|low|medium|high" ;;
     esac
     if [ "${WS_VERIFY_LLM:-0}" = "1" ]; then
       local live
       live="$(python "$WS_ROOT/tools/llm_probe.py" --quick 2>&1 | tail -3)"
       case "$live" in
-        *'"switch_works": true'*) ok "live LLM probe: the thinking switch demonstrably works" ;;
+        *'"switch_works": true'*) ok "live LLM probe: reasoning_effort=none really suppresses thinking" ;;
         *) wrn "live LLM probe inconclusive (WS_VERIFY_LLM=1): $(printf '%s' "$live" | tail -1)" ;;
       esac
     fi
