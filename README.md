@@ -22,6 +22,7 @@ ws-verify --relocate                  # + copy the tree elsewhere, self-heal, re
 │   ├── ws-shell             # open a subshell with the toolchain activated
 │   ├── ws-config            # read config.yaml  (show|get|export|env-file|git-setup|validate)
 │   ├── ws-relocate          # repair absolute paths after a move/remount
+│   ├── ws-gateway           # L7 path router control — the one public entry point
 │   └── ws-verify            # health check
 ├── tools/
 │   ├── wsconfig.py          # config library + CLI backend
@@ -38,6 +39,9 @@ ws-verify --relocate                  # + copy the tree elsewhere, self-heal, re
 │   ├── cache/               #   uv / pip / npm caches + offline copies of downloads
 │   └── home/                #   XDG cache/config/data, history — kept inside the workspace
 ├── venvs/py/                # relocatable venv (python 3.13) with base packages
+├── services/                # long-running local services
+│   ├── gateway/             #   ws-gateway + routes.json (public fan-out by path prefix)
+│   └── sites/hello/         #   hello-world site served at /
 ├── projects/                # your work goes here
 ├── logs/                    # verify logs etc.
 └── tmp/                     # scratch
@@ -226,6 +230,46 @@ Two credential styles are supported and can coexist:
 **Pending input:** `git.identity.*`, `git.credentials[*].*`, `api_keys.*` are empty
 placeholders — `ws-config validate` lists them. Fill them in and git/API calls start working
 immediately; no other change is needed.
+
+## Public egress — `ws-gateway` behind nginx-proxy-manager
+
+Exactly one public address is approved for this workspace: **`novara.remoteblossom.com`**.
+Nginx Proxy Manager (container `ix-nginx-proxy-manager-npm-1`, on the shared docker network
+as `172.16.1.2`) forwards that domain to this container's router, which turns one entry point
+into many services by **path prefix**:
+
+```
+internet -> Cloudflare -> nginx-proxy-manager -> ws-gateway (:80 and :8081) -> local services
+```
+
+```bash
+ws-gateway status          # pid, /healthz, listen ports, route table
+ws-gateway ensure          # start only when unhealthy (cron watchdog entry point)
+ws-gateway restart         # reload routes.json
+ws-gateway logs 50
+```
+
+Add a service by editing **`services/gateway/routes.json`** (schema in `routes.example.json`):
+
+* `static` — serve a directory from the workspace:
+  `{ "prefix": "/hello", "type": "static", "root": "services/sites/hello" }`
+* `proxy` — hand a path prefix to a local port:
+  `{ "prefix": "/app", "type": "proxy", "upstream": "http://127.0.0.1:8082", "strip_prefix": true }`
+
+Then `ws-gateway restart` (the table is read at start-up). `/healthz` is reserved by the router,
+and both listen ports carry the same table, so NPM can forward to either one. Route matching is
+longest-prefix; `strip_prefix` decides whether the prefix is removed before forwarding.
+
+**Surviving a new image.** Everything the router needs lives on the bind-mounted workspace
+(`services/gateway/`, `bin/ws-gateway`) and runs on the workspace's own venv python, so a
+container rebuilt from a different image restores the public entry point without image changes:
+the Hermes cron job **`ws-gateway watchdog`** (every minute, no LLM) runs `ws-gateway ensure`,
+bringing the router back within ~60 s and staying silent while it is healthy. Its glue script
+(`$HERMES_HOME/scripts/ws-gateway-ensure.sh`) is deployment wiring, deliberately outside the
+workspace.
+
+Known limits: plain HTTP only (no WebSocket upgrade yet) and each proxied response is buffered
+before it is returned.
 
 ## Portability / relocation
 
