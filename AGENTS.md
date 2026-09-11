@@ -20,7 +20,7 @@ rule text into memory, README or skills — duplication is what drifts.
    `tools/bootstrap.sh`, never committed.
 5. **Finish a batch**: commit, push, then read the remote refs back.
 6. **Public egress**: `novara.remoteblossom.com` is the only approved public address; new services are path prefixes behind `ws-gateway`, never a new host port.
-7. **Repo scope**: this repo tracks the portable environment only; `projects/**` and any non-example service in `services/**` stay untracked, each project in its own repo.
+7. **Repo scope**: track the environment and its system services; `projects/**` and project-owned services stay untracked, each project in its own repo.
 
 ## Maintenance
 

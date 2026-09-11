@@ -42,9 +42,9 @@ ws-verify --relocate                  # + copy the tree elsewhere, self-heal, re
 ├── services/                # system-level services (tracked)
 │   ├── services.example.json#   manifest example; the live services.json is machine state
 │   ├── gateway/             #   ws-gateway + routes.example.json (public fan-out by prefix)
+│   ├── dashboard/           #   ws-dashboard: the ops UI served at /
 │   └── sites/hello/         #   the hello-world example, served at /projects/hello
 ├── projects/                # YOUR projects — each one its own repo, untracked here (rule 7)
-│   └── dashboard/           #   example: ws-dashboard, the ops UI behind /
 ├── projects/                # your work goes here
 ├── logs/                    # verify logs etc.
 └── tmp/                     # scratch
@@ -69,8 +69,10 @@ duplication is what drifts when context gets compacted.
 
 `AGENTS.md` **rule 7**: this repo tracks the **portable environment** only.
 
-* **tracked** — `bin/`, `tools/`, `services/gateway/` (the system router), `services/sites/hello/`
-  (the example), the `*.example.json` manifests, and the docs.
+* **tracked** — `bin/`, `tools/`, the system services under `services/` (`gateway` the router,
+  `dashboard` the ops UI), `services/sites/hello/` (the example), the `*.example.json` manifests,
+  and the docs. A component is system-level when the workspace itself needs it to run; everything
+  that belongs to a user project goes to `projects/` instead.
 * **untracked, on the bind mount** — `projects/**`, whose members are separate repos, plus
   `services/services.json` and `services/gateway/routes.json`. That is the same split as
   `config.yaml` (machine state, gitignored) vs `config.example.yaml` (tracked).
@@ -302,7 +304,7 @@ is the manifest of everything that must stay up; each entry
 declares `script`, `probe_ports`, `health` and `log`, and every service implements
 `--healthz PORT` (exit 0 when it answers its health path). `ws-gateway status` shows them all,
 `ws-gateway start|stop|restart [SERVICE ...]` controls one or all, and `ensure` starts whatever is
-down — which is what the cron watchdog calls. `ws-dashboard` (config: `projects/dashboard/config.json`)
+down — which is what the cron watchdog calls. `ws-dashboard` (config: `services/dashboard/config.json`)
 renders services, routes, watchers, container stats and the last requests, and its own `/api/status`
 is the machine-readable version of the same view.
 
