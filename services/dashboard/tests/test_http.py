@@ -50,6 +50,8 @@ class Client:
                 return exc.code, json.loads(body or "{}")
             except ValueError:
                 return exc.code, {"error": body[:200]}
+        except Exception as exc:  # connection dropped / refused / timeout
+            return "conn-error", {"error": "%s: %s" % (type(exc).__name__, exc)}
 
 
 def main() -> int:
@@ -64,16 +66,24 @@ def main() -> int:
     if token_file.exists():
         token_file.unlink()
     port = free_port()
-    cfg = json.loads((HERE / "config.json").read_text())
-    cfg["listen_port"] = port
-    cfg["files"] = {**cfg.get("files", {}), "token_file": str(token_file.relative_to(ws_root))}
-    cfg_path = work / "config.json"
-    cfg_path.write_text(json.dumps(cfg))
+    # Scratch manifest: the tracked example's dashboard entry, with a free port and a
+    # token file under tmp/ so the live manifest and token stay untouched.
+    base = json.loads((ws_root / "services" / "services.example.json").read_text())["dashboard"]
+    settings = dict(base.get("settings") or {})
+    settings["files"] = {**(settings.get("files") or {}),
+                         "token_file": str(token_file.relative_to(ws_root))}
+    manifest_path = work / "services.json"
+    manifest_path.write_text(json.dumps({
+        "_about": "scratch manifest for tests/test_http.py",
+        "dashboard": {**base, "port": port, "settings": settings},
+    }))
 
-    env = {"PATH": "/usr/bin:/bin", "WS_DASHBOARD_CONFIG": str(cfg_path),
+    env = {"PATH": "/usr/bin:/bin", "WS_MANIFEST": str(manifest_path), "WS_SERVICE": "dashboard",
            "WS_PID_FILE": str(work / "dashboard.pid"), "HERMES_HOME": "/opt/data"}
+    server_log = work / "server.log"
+    log_handle = open(server_log, "w")
     proc = subprocess.Popen([sys.executable, str(HERE / "dashboard.py")], env=env,
-                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                            stdout=log_handle, stderr=subprocess.STDOUT, text=True)
     base = f"http://127.0.0.1:{port}"
     failures: list[str] = []
     checks = 0
@@ -99,7 +109,7 @@ def main() -> int:
                 time.sleep(0.2)
         else:
             print("FAIL  server did not answer /api/health within 15s")
-            print(proc.stdout.read() if proc.stdout else "")
+            print(server_log.read_text()[-2000:] if server_log.exists() else "")
             return 1
 
         status, body = client.request("/api/files/access")
@@ -162,7 +172,11 @@ def main() -> int:
               f"{status} {body}")
 
         status, body = client.request("/api/status")
-        check("the existing status API still answers", status == 200 and "services" in body)
+        check("the existing status API still answers", status == 200 and "services" in body,
+              f"{status} {str(body)[:200]}")
+        status, body = Client(base).request("/api/files/access")   # anonymous client
+        check("manifest settings reach the file browser (root=projects)",
+              status == 200 and body.get("browse_root") == "projects", str(body))
 
         # lockout: four more failures trip the five-failure guard, and it must stay tripped.
         for _ in range(5):
@@ -176,7 +190,11 @@ def main() -> int:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
-        for leftover in (token_file, cfg_path, work / "dashboard.pid"):
+        log_handle.close()
+        if failures:
+            print("--- server log tail ---")
+            print("".join(server_log.read_text().splitlines(True)[-15:]))
+        for leftover in (token_file, manifest_path, work / "dashboard.pid"):
             try:
                 leftover.unlink()
             except OSError:

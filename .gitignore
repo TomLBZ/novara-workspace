@@ -39,4 +39,3 @@ node_modules/
 projects/*
 !projects/.gitkeep
 services/services.json
-services/gateway/routes.json

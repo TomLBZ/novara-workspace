@@ -18,6 +18,15 @@
 #     from wsconfig import load, get
 #     get(load(), "api_keys.openai.value")
 #
+#  WHERE DO I CHANGE WHAT?
+#    here (config.yaml)      api keys, git credentials + identity, LLM settings,
+#                            and dashboard.admin_token (see the dashboard section)
+#    services/services.json  which services run, their ports / health paths / logs,
+#                            the router's route table, and per-service settings
+#                            (e.g. dashboard.settings.files.*)
+#    Nothing is configured in two files. `ws-config show` redacts secrets; the
+#    manifest is validated by `ws-gateway validate`.
+#
 #  SECURITY: this file holds secrets -> mode 0600, and it is listed in
 #  .gitignore so it can never be committed by accident.
 # =============================================================================
@@ -136,6 +145,22 @@ api_keys:
 secrets: {}
   # INTERNAL_ERP_TOKEN: ""
   # SMTP_PASSWORD: ""
+
+# --- dashboard (ws-dashboard service) ----------------------------------------
+# The dashboard's file browser has two scopes: without a token it browses
+# services/services.json -> dashboard.settings.files.root (default "projects"),
+# with the token it widens to the workspace root. Secrets stay denied in both.
+#
+#   admin_token: ""          let the service generate config/dashboard-admin-token
+#                            (mode 0600, gitignored) on first start - read it with
+#                            services/dashboard/dashboard.py --files-token
+#   admin_token: "<value>"   that exact string is required; any non-empty string
+#                            works (>= 16 chars recommended). Quote it if it starts
+#                            with a YAML special character or contains ": ".
+# Rotate by editing this value, or with
+# services/dashboard/dashboard.py --files-token --rotate.
+dashboard:
+  admin_token: ""
 
 # --- networking --------------------------------------------------------------
 proxy:

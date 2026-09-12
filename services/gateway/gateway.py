@@ -3,8 +3,9 @@
 
 One public entry point (Nginx Proxy Manager -> this router) fans out to any number
 of local services by path prefix.  Everything is stdlib-only so it runs on whatever
-python the workspace carries, and the route table lives in routes.json next to this
-file (see routes.example.json for the schema in use).
+python the workspace carries, and the route table comes from the service manifest
+(`services/services.json` -> the `gateway` entry; see `services/services.example.json`
+for the tracked baseline and `tools/servicemanifest.py` for the reader/validator).
 
     python3 services/gateway/gateway.py            # foreground
     bin/ws-gateway start|stop|status|ensure        # managed
@@ -29,7 +30,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 WS_ROOT = HERE.parents[1]
-ROUTES_FILE = HERE / "routes.json"
+sys.path.insert(0, str(WS_ROOT / "tools"))
+import servicemanifest as sm  # noqa: E402  (workspace tool, stdlib only)
+
 PID_FILE = Path(os.environ.get("WS_PID_FILE", str(WS_ROOT / "runtime" / "run" / "gateway.pid")))
 
 HOP_BY_HOP = {
@@ -44,20 +47,27 @@ def log(msg: str) -> None:
 
 
 def load_routes() -> dict:
-    if not ROUTES_FILE.exists():
-        raise SystemExit("ws-gateway: missing %s" % ROUTES_FILE)
-    cfg = json.loads(ROUTES_FILE.read_text())
-    listen = cfg.get("listen") or []
+    """`{listen: [ports], routes: [...]}` from the gateway entry of the service manifest."""
+    try:
+        manifest = sm.load(WS_ROOT)
+        entry = sm.entry(manifest, os.environ.get("WS_SERVICE", "gateway"))
+        routes = sm.routes(manifest, os.environ.get("WS_SERVICE", "gateway"))
+        found = sm.problems(manifest)
+    except sm.ManifestError as exc:
+        raise SystemExit("ws-gateway: %s" % exc)
+    if found:
+        raise SystemExit("ws-gateway: services/services.json is invalid:\n  - " + "\n  - ".join(found))
+    listen = sm.ports(entry)
     if not listen:
-        raise SystemExit("ws-gateway: routes.json needs a non-empty 'listen' list")
-    for r in cfg.get("routes", []):
+        raise SystemExit("ws-gateway: the gateway entry needs 'listen' (list of ports)")
+    for r in routes:
         if r.get("type") not in ("static", "proxy"):
             raise SystemExit("ws-gateway: route %r needs type static|proxy" % r.get("prefix"))
         if r["type"] == "static" and not r.get("root"):
             raise SystemExit("ws-gateway: static route %r needs 'root'" % r.get("prefix"))
         if r["type"] == "proxy" and not r.get("upstream"):
-            raise SystemExit("ws-gateway: proxy route %r needs 'upstream'" % r.get("prefix"))
-    return cfg
+            raise SystemExit("ws-gateway: proxy route %r needs 'service' or 'upstream'" % r.get("prefix"))
+    return {"listen": listen, "routes": routes}
 
 
 def pick_route(routes: list, path: str):

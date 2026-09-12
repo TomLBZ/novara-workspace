@@ -261,32 +261,49 @@ print(("ok:" + state) if ok else "MISMATCH:%s" % json.dumps(body))
   [ "$leaked" = "none" ] && ok "no host site-packages on sys.path" || wrn "host paths visible: $leaked"
   [ "${PYTHONNOUSERSITE:-}" = "1" ] && ok "PYTHONNOUSERSITE=1 (no ~/.local leakage)" || wrn "PYTHONNOUSERSITE unset"
 
-  sect "9. dashboard file browser (read-only API)"
-  if [ -f "$WS_ROOT/services/dashboard/files.py" ]; then
-    local fb_cfg fb_out fb_rc
-    fb_cfg="$(python -c "
-import json,sys
-cfg=json.load(open('$WS_ROOT/services/dashboard/config.json'))
-print(cfg.get('files',{}).get('root','<missing>'))")"
-    [ "$fb_cfg" = "projects" ] && ok "config.json files.root defaults to projects" \
-      || wrn "config.json files.root is '$fb_cfg' (expected 'projects')"
-    for suite in test_files.py test_http.py; do
-      fb_out="$(cd "$WS_ROOT" && python3 "services/dashboard/tests/$suite" 2>&1)"; fb_rc=$?
-      if [ "$fb_rc" -eq 0 ]; then
-        ok "dashboard $suite: $(printf '%s' "$fb_out" | grep -c '^PASS\|ok$') checks passed"
-      else
-        bad "dashboard $suite failed (rc=$fb_rc)"
-        printf '%s\n' "$fb_out" | grep -E 'FAIL|failed|Error' | sed 's/^/      /' | head -8
-      fi
+  sect "9. service manifest + dashboard file browser"
+  if [ -f "$WS_ROOT/tools/servicemanifest.py" ]; then
+    local sm_out sm_rc sm_names fb_root legacy
+    sm_out="$(python3 "$WS_ROOT/tools/servicemanifest.py" --root "$WS_ROOT" validate 2>&1)"; sm_rc=$?
+    [ "$sm_rc" -eq 0 ] && ok "services.json validates (${sm_out#services.json OK: })" \
+      || bad "services.json invalid: $sm_out"
+
+    sm_names="$(python3 "$WS_ROOT/tools/servicemanifest.py" --root "$WS_ROOT" services 2>/dev/null | tr '\n' ' ')"
+    case "$sm_names" in
+      "")  bad "manifest lists no services" ;;
+      *_*) bad "manifest comment keys leak as services: $sm_names" ;;
+      *)   ok "manifest services: $sm_names" ;;
+    esac
+
+    fb_root="$(python3 "$WS_ROOT/tools/servicemanifest.py" --root "$WS_ROOT" settings dashboard 2>/dev/null \
+      | python3 -c 'import json,sys;print((json.load(sys.stdin).get("files") or {}).get("root",""))' 2>/dev/null)"
+    [ "$fb_root" = "projects" ] && ok "dashboard settings come from the manifest (files.root=projects)" \
+      || wrn "dashboard files.root is '$fb_root' (expected projects)"
+
+    for legacy in services/gateway/routes.json services/gateway/routes.example.json services/dashboard/config.json; do
+      [ -e "$WS_ROOT/$legacy" ] && bad "superseded config still present: $legacy"
     done
-    if grep -qE '^\s*"projects"|files' "$WS_ROOT/services/dashboard/config.json" \
-       && grep -q 'dashboard-admin-token' "$WS_ROOT/.gitignore"; then
-      ok "generated admin token file is gitignored"
+    ok "no superseded config files (routes*.json, dashboard/config.json)"
+
+    if [ -f "$WS_ROOT/services/dashboard/files.py" ]; then
+      for suite in test_files.py test_http.py; do
+        local fb_out fb_rc
+        fb_out="$(cd "$WS_ROOT" && python3 "services/dashboard/tests/$suite" 2>&1)"; fb_rc=$?
+        if [ "$fb_rc" -eq 0 ]; then
+          ok "dashboard $suite: $(printf '%s' "$fb_out" | grep -c '^PASS\|ok$') checks passed"
+        else
+          bad "dashboard $suite failed (rc=$fb_rc)"
+          printf '%s\n' "$fb_out" | grep -E 'FAIL|failed|Error' | sed 's/^/      /' | head -8
+        fi
+      done
+      grep -q 'dashboard-admin-token' "$WS_ROOT/.gitignore" \
+        && ok "generated admin token file is gitignored" \
+        || bad "config/dashboard-admin-token is not covered by .gitignore"
     else
-      bad "config/dashboard-admin-token is not covered by .gitignore"
+      wrn "services/dashboard/files.py missing - file browser not installed"
     fi
   else
-    wrn "services/dashboard/files.py missing - file browser not installed"
+    wrn "tools/servicemanifest.py missing - service manifest is not centralised"
   fi
 }
 

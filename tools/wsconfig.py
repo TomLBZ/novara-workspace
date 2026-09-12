@@ -510,6 +510,20 @@ def cmd_validate(args) -> int:
         val = llm.get(num)
         if val is not None and not isinstance(val, (int, float)):
             problems.append(f"llm.{num} must be a number or null")
+    # --- dashboard (ws-dashboard service) -------------------------------------
+    dash = get(data, "dashboard", {}) or {}
+    if not isinstance(dash, dict):
+        problems.append("`dashboard` must be a mapping")
+    else:
+        unknown_dash = [k for k in dash if k != "admin_token"]
+        if unknown_dash:
+            problems.append(f"dashboard: unexpected key(s) {unknown_dash}; the block is "
+                            "exactly ['admin_token'] (service topology lives in "
+                            "services/services.json)")
+        token = dash.get("admin_token")
+        if token is not None and not isinstance(token, str):
+            problems.append('dashboard.admin_token must be a string ("" = let the service '
+                            "generate config/dashboard-admin-token on first start)")
     for name, entry in apikeys.items():
         if not isinstance(entry, dict):
             continue

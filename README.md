@@ -43,8 +43,8 @@ ws-verify --relocate                  # + copy the tree elsewhere, self-heal, re
 │   └── home/                #   XDG cache/config/data, history — kept inside the workspace
 ├── venvs/py/                # relocatable venv (python 3.13) with base packages
 ├── services/                # system-level services (tracked)
-│   ├── services.example.json#   manifest example; the live services.json is machine state
-│   ├── gateway/             #   ws-gateway + routes.example.json (public fan-out by prefix)
+│   ├── services.example.json#   service manifest baseline (script/ports/routes/settings)
+│   ├── gateway/             #   ws-gateway: the L7 path router (routes come from the manifest)
 │   ├── dashboard/           #   ws-dashboard: the ops UI served at /
 │   └── sites/hello/         #   the hello-world example, served at /projects/hello
 ├── projects/                # YOUR projects — each one its own repo, untracked here (rule 7)
@@ -77,17 +77,32 @@ duplication is what drifts when context gets compacted.
   and the docs. A component is system-level when the workspace itself needs it to run; everything
   that belongs to a user project goes to `projects/` instead.
 * **untracked, on the bind mount** — `projects/**`, whose members are separate repos, plus
-  `services/services.json` and `services/gateway/routes.json`. That is the same split as
-  `config.yaml` (machine state, gitignored) vs `config.example.yaml` (tracked).
-* **bootstrap** — the first `bin/ws-gateway` run copies `services.example.json` → `services.json`
-  and `routes.example.json` → `routes.json`. Both examples carry the **system-level baseline**
-  (`gateway` + `dashboard`; dashboard at `/`, hello example at `/projects/hello`), so a fresh clone
-  is complete and knows nothing about any project; the live copies equal the examples on a machine
-  that runs only system services. A manifest entry whose script is missing (project repo not
-  cloned on this machine) shows as `absent` and is skipped by `ensure`, so the watchdog never
-  couples the repo to a project.
-* **adding a project** is two machine-local edits — the service entry in
-  `services/services.json` and its prefix in `services/gateway/routes.json` — and zero edits here.
+  `services/services.json`. That is the same split as `config.yaml` (machine state, gitignored) vs
+  `config.example.yaml` (tracked).
+* **bootstrap** — the first `bin/ws-gateway` run copies `services.example.json` → `services.json`.
+  The example carries the **system-level baseline** (`gateway` + `dashboard`; dashboard at `/`,
+  hello example at `/projects/hello`), so a fresh clone is complete and knows nothing about any
+  project. A manifest entry whose script is missing (project repo not cloned on this machine) shows
+  as `absent` and is skipped by `ensure`, so the watchdog never couples the repo to a project.
+* **adding a service or a project** is one machine-local edit — an entry in
+  `services/services.json` (its route, if it needs one, is a `routes` entry on `gateway`) — and zero
+  edits here. That file is the single source of service truth:
+
+  ```json
+  "gateway":   { "script": "services/gateway/gateway.py", "listen": [80, 8081], "health": "/healthz",
+                 "log": "logs/gateway.log",
+                 "routes": [ { "prefix": "/", "type": "proxy", "service": "dashboard" } ] },
+  "dashboard": { "script": "services/dashboard/dashboard.py", "port": 8090, "health": "/api/health",
+                 "log": "logs/dashboard.log",
+                 "settings": { } }
+  ```
+
+  A proxy route names a **service** (`"service": "dashboard"`) and its port is resolved from that
+  entry, or an explicit `"upstream": "http://host:port"` for anything outside the workspace. Ports,
+  health paths, logs and settings are never written twice. Credentials, identity and LLM settings
+  stay in `config.yaml`; top-level keys starting with `_` in the manifest are comments.
+  `ws-gateway validate` checks the file (exit 3 = problems, with the reason and the recovery line),
+  `ws-gateway status` prints the services plus the resolved route table.
 
 ## Writing files inside `/workspace` (the Hermes write guard)
 
@@ -329,17 +344,18 @@ The live table (2026-09-11) — the dashboard owns `/`, projects live under a pr
 
 `/healthz` is reserved by the router, and both listen ports carry the same table, so NPM can forward
 to either one. Route matching is longest-prefix; `strip_prefix` decides whether the prefix is
-removed before forwarding. After editing `routes.json`, `ws-gateway restart gateway` (the table is
-read at start-up).
+removed before forwarding. The table lives in the manifest (`services.json` → `gateway.routes`), so
+after editing it run `ws-gateway validate && ws-gateway restart gateway` (it is read at start-up).
 
-**Services.** The machine-local `services/services.json` (bootstrapped from the tracked example)
-is the manifest of everything that must stay up; each entry
-declares `script`, `probe_ports`, `health` and `log`, and every service implements
-`--healthz PORT` (exit 0 when it answers its health path). `ws-gateway status` shows them all,
-`ws-gateway start|stop|restart [SERVICE ...]` controls one or all, and `ensure` starts whatever is
-down — which is what the cron watchdog calls. `ws-dashboard` (config: `services/dashboard/config.json`)
-renders services, routes, watchers, container stats and the last requests, and its own `/api/status`
-is the machine-readable version of the same view.
+**Services.** The machine-local `services/services.json` (bootstrapped from the tracked example) is
+the manifest of everything that must stay up; each entry declares `script`, a port (`port`, or
+`listen` for the multi-port router), `health` and `log`, and every service implements `--healthz PORT`
+(exit 0 when it answers its health path). `ws-gateway status` shows them all plus the resolved route
+table, `ws-gateway validate` checks the manifest, `ws-gateway start|stop|restart [SERVICE ...]`
+controls one or all, and `ensure` starts whatever is down — which is what the cron watchdog calls.
+`ws-dashboard` takes its port and settings from its manifest entry (it has no file of its own) and
+renders services, routes, watchers, container stats and the last requests; `/api/status` is the
+machine-readable version of the same view and `--check` prints the entry it resolved.
 
 **File browser.** `ws-dashboard` also serves a **read-only** file browser (`/api/files/access|list|read|raw`,
 UI card "Files"; implementation `services/dashboard/files.py`). Two scopes: without a token it browses
@@ -356,8 +372,8 @@ services/dashboard/dashboard.py --files-token            # print it (generates o
 services/dashboard/dashboard.py --files-token --rotate   # new token, old one dies at once
 ```
 
-Five wrong tokens from one client lock the unlock endpoint for 5 minutes. Knobs live in
-`services/dashboard/config.json` under `files` (`root`, `admin_root`, `token_file`, `max_entries`,
+Five wrong tokens from one client lock the unlock endpoint for 5 minutes. Knobs live in the manifest
+under `dashboard.settings.files` (`root`, `admin_root`, `token_file`, `max_entries`,
 `max_preview_bytes`, `max_raw_bytes`, `deny_extra`).
 
 **Surviving a new image.** Every service lives on the bind-mounted workspace (`services/`,

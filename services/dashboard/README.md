@@ -9,7 +9,8 @@ own repos instead.
   container stats, recent requests), `/api/health` and the `/api/files/*` file browser; implements
   `--healthz PORT`.
 * `files.py` — the read-only file-browser backend (scopes, deny list, previews, admin token).
-* `config.json` — `listen_host`, `listen_port`, `public_url`, `refresh_seconds`, `files{...}`.
+* no config file of its own — port, health path and settings come from its entry in
+  `/workspace/services/services.json` (`tools/servicemanifest.py` is the reader/validator).
 * `static/` — `index.html`, `app.css`, `app.js` (no build step, no CDN; `data-cfasync="false"`
   opts out of Cloudflare Rocket Loader).
 * `tests/` — `test_files.py` (backend units) and `test_http.py` (end-to-end over a scratch port);
@@ -47,9 +48,11 @@ services/dashboard/dashboard.py --files-token --rotate   # rotate (the old token
 ws-config get dashboard.admin_token --reveal             # if you pinned one in config.yaml
 ```
 
-Machine-local knobs live in `config.json` → `files`: `root`, `admin_root`, `token_file`,
-`max_entries`, `max_preview_bytes`, `max_raw_bytes`, `deny_extra`. Env overrides for testing:
-`WS_DASHBOARD_CONFIG` (alternate config) and `WS_PID_FILE` (alternate pid file).
+Knobs live in `services/services.json` under `dashboard.settings` (`public_url`, `refresh_seconds`,
+`files{root, admin_root, token_file, max_entries, max_preview_bytes, max_raw_bytes, deny_extra}`).
+Env: `WS_SERVICE` (which manifest entry is me, default `dashboard`), `WS_MANIFEST` (alternate manifest
+file — how the tests stay off the live one) and `WS_PID_FILE`. `dashboard.py --check` prints the entry
+it resolved; `--files-token [--rotate]` prints/rotates the file-browser token.
 
 ## Running it
 
@@ -59,16 +62,18 @@ Registering it on a machine is one entry in the workspace's service manifest
 ```json
 "dashboard": {
   "script": "services/dashboard/dashboard.py",
-  "probe_ports": [8090],
+  "port": 8090,
   "health": "/api/health",
-  "log": "logs/dashboard.log"
+  "log": "logs/dashboard.log",
+  "settings": { "public_url": "https://…", "refresh_seconds": 5, "files": { "root": "projects" } }
 }
 ```
 
-then `ws-gateway restart dashboard`. The path prefix that exposes it publicly lives in
-`/workspace/services/gateway/routes.json` (`/` → `http://127.0.0.1:8090`). Restart the service after
-changing `dashboard.py`, `files.py` or the static files (they are read at start-up / per request —
-static assets are re-read per request, Python modules are not).
+then `ws-gateway validate && ws-gateway restart dashboard`. The public path is a route on the same
+file's `gateway` entry (`{ "prefix": "/", "type": "proxy", "service": "dashboard" }` — the upstream
+`http://127.0.0.1:8090` is resolved from the port above, so the port is written once). Restart the
+service after changing `dashboard.py`, `files.py` or the static files (Python modules are read at
+start-up, static assets per request).
 
 Checks: `python3 services/dashboard/tests/test_files.py` and
 `python3 services/dashboard/tests/test_http.py` (or simply `tools/verify.sh`).

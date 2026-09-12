@@ -3,50 +3,52 @@
 # ---------------------------------------------------------------------------
 # <workspace>/bin/ws-gateway
 #
-# Control the workspace's long-running services.  `gateway` is the L7 path
-# router that the public domain lands on; every service listed in
-# services/services.json implements `--healthz PORT` and is kept alive by
-# `ensure` (the per-minute cron watchdog calls it, so a container rebuilt from
-# a new image comes back by itself).
+# Control the workspace's long-running services.  Every service is defined in
+# services/services.json (see services.example.json for the tracked baseline -
+# that file is the single source of service truth: script, ports, health path,
+# log, the router's route table and each service's settings).  Credentials and
+# LLM settings live in config.yaml, never here.
 #
-#   ws-gateway status                 all services + the route table
+#   ws-gateway status                 services + the resolved route table
+#   ws-gateway validate               check services.json (exit 3 = problems)
 #   ws-gateway start|stop|restart [SERVICE ...]
 #   ws-gateway ensure                 start whatever is down, silent when all is well
-#   ws-gateway routes                 print routes.json
+#   ws-gateway routes                 print the resolved route table
 #   ws-gateway logs [SERVICE] [N]     tail a service log (default: gateway)
+#
+# Every service implements `--healthz PORT`; `ensure` is what the per-minute cron
+# watchdog calls, so a container rebuilt from a new image comes back by itself.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 _ws_self="${BASH_SOURCE[0]:-$0}"
 WS_ROOT="$(cd -P "$(dirname "$_ws_self")/.." && pwd)"
 MANIFEST="$WS_ROOT/services/services.json"
-ROUTES="$WS_ROOT/services/gateway/routes.json"
 RUN_DIR="$WS_ROOT/runtime/run"
 mkdir -p "$RUN_DIR" "$WS_ROOT/logs"
 
-# First run on a fresh clone: the live manifests are machine state (gitignored, like
-# config.yaml); they bootstrap from the tracked examples, which the environment alone can serve.
+# First run on a fresh clone: the live manifest is machine state (gitignored, like
+# config.yaml); it bootstraps from the tracked example, which the environment alone can serve.
 [ -f "$MANIFEST" ] || cp "$WS_ROOT/services/services.example.json" "$MANIFEST"
-[ -f "$ROUTES" ]   || cp "$WS_ROOT/services/gateway/routes.example.json" "$ROUTES"
 
 PY="$WS_ROOT/venvs/py/bin/python"
 [ -x "$PY" ] || PY="$(command -v python3 || command -v python)"
 
-_services() { "$PY" -c "import json;print(' '.join(json.load(open('$MANIFEST')).keys()))"; }
+_sm() { WS_ROOT="$WS_ROOT" "$PY" "$WS_ROOT/tools/servicemanifest.py" --root "$WS_ROOT" "$@"; }
 
-_field() { # _field SERVICE KEY -> scalar, or space-joined list
-  "$PY" -c "
-import json, sys
-spec = json.load(open('$MANIFEST')).get(sys.argv[1], {})
-val = spec.get(sys.argv[2])
-print(' '.join(str(v) for v in val) if isinstance(val, list) else (val or ''))
-" "$1" "$2" 2>/dev/null || true
+manifest_problems() { # 0 = valid, prints the reasons otherwise
+  local out
+  if ! out="$(_sm validate 2>&1)"; then
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+  return 0
 }
 
-script_of() { echo "$WS_ROOT/$(_field "$1" script)"; }
-installed() { [ -f "$(script_of "$1")" ]; }
-ports_of()  { _field "$1" probe_ports; }
-log_of()    { echo "$WS_ROOT/$(_field "$1" log)"; }
+_services() { _sm services; }
+script_of() { echo "$WS_ROOT/$(_sm script "$1")"; }
+ports_of()  { _sm ports "$1"; }
+log_of()    { echo "$WS_ROOT/$(_sm log "$1")"; }
 pid_file()  { echo "$RUN_DIR/$1.pid"; }
 
 alive() {
@@ -54,13 +56,15 @@ alive() {
   [ -f "$f" ] && kill -0 "$(cat "$f")" 2>/dev/null
 }
 
-healthy() { # any probe port answering the health path counts as healthy
+healthy() { # any port answering the health path counts as healthy
   local svc="$1" p
   for p in $(ports_of "$svc"); do
     WS_PID_FILE="$(pid_file "$svc")" "$PY" "$(script_of "$svc")" --healthz "$p" 2>/dev/null && return 0
   done
   return 1
 }
+
+installed() { [ -f "$(script_of "$1")" ]; }
 
 start_one() {
   local svc="$1" log
@@ -70,7 +74,8 @@ start_one() {
   alive "$svc" && { echo "$svc: up but not answering - restarting"; stop_one "$svc" >/dev/null; }
   mkdir -p "$(dirname "$log")"
   echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ') ws-gateway: starting $svc ports: $(ports_of "$svc")" >>"$log"
-  WS_ROOT="$WS_ROOT" WS_PID_FILE="$(pid_file "$svc")" setsid nohup "$PY" "$(script_of "$svc")" >>"$log" 2>&1 </dev/null &
+  WS_ROOT="$WS_ROOT" WS_MANIFEST="$MANIFEST" WS_SERVICE="$svc" WS_PID_FILE="$(pid_file "$svc")" \
+    setsid nohup "$PY" "$(script_of "$svc")" >>"$log" 2>&1 </dev/null &
   for _ in $(seq 1 30); do
     sleep 0.2
     healthy "$svc" && { echo "$svc: up (pid $(cat "$(pid_file "$svc")" 2>/dev/null))"; return 0; }
@@ -95,6 +100,7 @@ stop_one() {
 }
 
 ensure() { # silent while healthy: this is the cron watchdog entry point
+  manifest_problems || return 1
   local svc
   for svc in $(_services); do
     installed "$svc" || continue          # a project repo that is not cloned here is not an error
@@ -104,7 +110,8 @@ ensure() { # silent while healthy: this is the cron watchdog entry point
 }
 
 status() {
-  local svc pid
+  manifest_problems || return 1
+  local svc pid state
   printf '%-10s %-8s %-11s %-6s %s\n' SERVICE PID PORTS HEALTH LOG
   for svc in $(_services); do
     if alive "$svc"; then pid="$(cat "$(pid_file "$svc")")"; else pid="-"; fi
@@ -113,18 +120,23 @@ status() {
       "$state" "$(log_of "$svc")"
   done
   echo
-  echo "ROUTES (ws-gateway path table)"
-  "$PY" -c "
-import json, signal
+  echo "MANIFEST (services/services.json - services, ports, routes, settings)"
+  echo "  validated: OK"
+  echo
+  echo "ROUTES (resolved; a proxy route names its target service)"
+  _sm routes | "$PY" -c '
+import json, signal, sys
 signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-for r in json.load(open('$ROUTES'))['routes']:
-    print('  %-18s %-6s %s' % (r.get('prefix'), r['type'], r.get('root') or r.get('upstream')))
-"
+for r in json.load(sys.stdin):
+    print("  %-18s %-6s %s" % (r.get("prefix"), r.get("type"),
+                               r.get("root") or r.get("upstream")))
+'
 }
 
 case "${1:-status}" in
   start|stop|restart)
     verb="$1"; shift || true
+    manifest_problems || exit 3
     targets=("$@"); [ ${#targets[@]} -eq 0 ] && targets=($(_services))
     for s in "${targets[@]}"; do
       case "$verb" in
@@ -133,9 +145,10 @@ case "${1:-status}" in
         restart) stop_one "$s" >/dev/null; start_one "$s" ;;
       esac
     done ;;
-  ensure)  ensure ;;
-  status)  status ;;
-  routes)  "$PY" -c "import json;print(json.dumps(json.load(open('$ROUTES')),indent=2))" ;;
-  logs)    tail -n "${3:-40}" "$(log_of "${2:-gateway}")" ;;
-  *) echo "usage: ws-gateway {status|start|stop|restart|ensure|routes|logs [SERVICE] [N]}" >&2; exit 2 ;;
+  ensure)   ensure ;;
+  status)   status ;;
+  validate) _sm validate ;;
+  routes)   _sm routes ;;
+  logs)     tail -n "${3:-40}" "$(log_of "${2:-gateway}")" ;;
+  *) echo "usage: ws-gateway {status|validate|start|stop|restart|ensure|routes|logs [SERVICE] [N]}" >&2; exit 2 ;;
 esac

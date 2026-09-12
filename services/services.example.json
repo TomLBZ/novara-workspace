@@ -1,19 +1,44 @@
 {
+  "_about": "Machine-local deployment state: THE single place where the workspace's services are defined - script, ports, health path, log, the router's route table and each service's own settings. This live copy is gitignored machine state; the tracked baseline is services.example.json (a fresh clone copies it over this file).",
+  "_map": "edit HERE for: which services run, their ports, health paths, logs, the gateway route table, and per-service settings (e.g. dashboard.settings). edit ../config.yaml for: API keys, git identity, LLM settings and dashboard.admin_token. Nothing is configured in two files; top-level keys starting with '_' are comments and are ignored by every reader.",
   "gateway": {
     "script": "services/gateway/gateway.py",
-    "probe_ports": [
+    "listen": [
       80,
       8081
     ],
     "health": "/healthz",
-    "log": "logs/gateway.log"
+    "log": "logs/gateway.log",
+    "routes": [
+      {
+        "prefix": "/projects/hello",
+        "type": "static",
+        "root": "services/sites/hello"
+      },
+      {
+        "prefix": "/",
+        "type": "proxy",
+        "service": "dashboard"
+      }
+    ]
   },
   "dashboard": {
     "script": "services/dashboard/dashboard.py",
-    "probe_ports": [
-      8090
-    ],
+    "port": 8090,
     "health": "/api/health",
-    "log": "logs/dashboard.log"
+    "log": "logs/dashboard.log",
+    "settings": {
+      "public_url": "https://novara.remoteblossom.com",
+      "refresh_seconds": 5,
+      "files": {
+        "root": "projects",
+        "admin_root": ".",
+        "token_file": "config/dashboard-admin-token",
+        "max_entries": 2000,
+        "max_preview_bytes": 262144,
+        "max_raw_bytes": 1048576,
+        "deny_extra": []
+      }
+    }
   }
 }

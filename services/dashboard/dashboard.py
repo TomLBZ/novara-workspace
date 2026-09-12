@@ -2,7 +2,10 @@
 """ws-dashboard - the workspace's operations dashboard (stdlib only).
 
 Serves the UI plus a small JSON API and is reached from the public entry point
-through ws-gateway (route "/" -> http://127.0.0.1:8090).
+through ws-gateway (a proxy route that names this service). Everything it needs -
+port, health path, and its own settings - comes from the service manifest
+(`services/services.json` -> the `dashboard` entry; tracked baseline
+`services/services.example.json`). Credentials live in `config.yaml`, never here.
 
   /                UI (static/index.html)
   /assets/<f>      static assets
@@ -28,8 +31,21 @@ import urllib.parse
 
 HERE = pathlib.Path(__file__).resolve().parent
 WS_ROOT = HERE.parents[1]
-CFG_PATH = pathlib.Path(os.environ.get("WS_DASHBOARD_CONFIG") or (HERE / "config.json"))
-CFG = json.loads(CFG_PATH.read_text())
+sys.path.insert(0, str(WS_ROOT / "tools"))
+import servicemanifest as sm  # noqa: E402  (workspace tool, stdlib only)
+
+SERVICE = os.environ.get("WS_SERVICE", "dashboard")
+try:
+    MANIFEST = sm.load(WS_ROOT)
+    ENTRY = sm.entry(MANIFEST, SERVICE)
+    CFG = sm.settings(MANIFEST, SERVICE)
+    _PROBLEMS = sm.problems(MANIFEST)
+except sm.ManifestError as exc:
+    print("ws-dashboard: %s" % exc, file=sys.stderr)
+    raise SystemExit(3)
+if _PROBLEMS:
+    print("ws-dashboard: services/services.json is invalid:\n  - " + "\n  - ".join(_PROBLEMS), file=sys.stderr)
+    raise SystemExit(3)
 sys.path.insert(0, str(HERE))
 from files import FileBrowser  # noqa: E402  (same directory, stdlib-only)
 
@@ -65,16 +81,17 @@ def probe(port: int, path: str = "/healthz", timeout: float = 2.0):
 
 
 def collect_services() -> list:
-    manifest = read_json(WS_ROOT / "services" / "services.json") or {}
     out = []
-    for name, spec in manifest.items():
+    for name in sm.services(MANIFEST):
+        spec = MANIFEST.get(name) or {}
+        ports = sm.ports(spec)
         pid_file = WS_ROOT / "runtime" / "run" / f"{name}.pid"
         pid, health = None, False
         try:
             pid = int(pid_file.read_text().strip())
         except Exception:
             pid = None
-        for port in spec.get("probe_ports", []):
+        for port in ports:
             ok, body = probe(port, spec.get("health", "/healthz"))
             if ok:
                 health = True
@@ -82,7 +99,7 @@ def collect_services() -> list:
         out.append({
             "name": name,
             "pid": pid if pid and _alive(pid) else None,
-            "ports": spec.get("probe_ports", []),
+            "ports": ports,
             "script": spec.get("script", ""),
             "healthy": health,
             "log": spec.get("log", ""),
@@ -99,9 +116,13 @@ def _alive(pid: int) -> bool:
 
 
 def collect_routes() -> list:
-    cfg = read_json(WS_ROOT / "services" / "gateway" / "routes.json") or {}
+    """The router's route table, resolved from the manifest (a `service` target -> its port)."""
+    try:
+        routes = sm.routes(MANIFEST)
+    except (sm.ManifestError, KeyError):
+        routes = []
     rows = []
-    for r in cfg.get("routes", []):
+    for r in routes:
         prefix = r.get("prefix", "/")
         rows.append({
             "prefix": prefix,
@@ -225,20 +246,26 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 state = (WS_ROOT / "runtime" / "run" / "public-check.state").read_text().strip()
             except Exception:
                 state = "unknown"
-            self._json({
-                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                "uptime_s": round(time.time() - STARTED),
-                "public": {
-                    "url": CFG.get("public_url"),
-                    "state": state,
-                    "refresh_seconds": CFG.get("refresh_seconds", 5),
-                },
-                "services": collect_services(),
-                "routes": collect_routes(),
-                "watchers": collect_watchers(),
-                "system": collect_system(),
-                "recent_requests": collect_requests(),
-            })
+            try:
+                payload = {
+                    "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "uptime_s": round(time.time() - STARTED),
+                    "public": {
+                        "url": CFG.get("public_url"),
+                        "state": state,
+                        "refresh_seconds": CFG.get("refresh_seconds", 5),
+                    },
+                    "services": collect_services(),
+                    "routes": collect_routes(),
+                    "watchers": collect_watchers(),
+                    "system": collect_system(),
+                    "recent_requests": collect_requests(),
+                }
+            except Exception as exc:  # never answer with a dropped connection
+                self._json({"error": "status collection failed: %s" % exc,
+                            "manifest": str(sm.path(WS_ROOT))}, 500)
+                return
+            self._json(payload)
             return
         if path.startswith("/api/files/"):
             self._files(path)
@@ -369,7 +396,8 @@ def probe_health(port: int) -> int:
 
 
 def main() -> int:
-    host, port = CFG.get("listen_host", "127.0.0.1"), int(CFG.get("listen_port", 8090))
+    ports_ = sm.ports(ENTRY)
+    host, port = CFG.get("listen_host", "127.0.0.1"), ports_[0]
     token, source = BROWSER.ensure_token()
     print("file browser: admin token source=%s scopes: %s (read-only) | print it with: %s --files-token" % (
         source, BROWSER.rel_root + " -> " + BROWSER.rel_admin_root, pathlib.Path(__file__).name), flush=True)
@@ -395,6 +423,16 @@ def main() -> int:
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--healthz":
         sys.exit(probe_health(int(sys.argv[2])))
+    if len(sys.argv) >= 2 and sys.argv[1] == "--check":
+        print("service:  %s (from %s)" % (SERVICE, sm.path(WS_ROOT)))
+        print("script:   %s" % ENTRY.get("script"))
+        print("ports:    %s" % " ".join(str(p) for p in sm.ports(ENTRY)))
+        print("health:   %s" % ENTRY.get("health"))
+        print("settings: %s" % json.dumps(CFG, sort_keys=True))
+        token, source = BROWSER.ensure_token()
+        print("files:    root=%s admin_root=%s token_source=%s" % (
+            BROWSER.rel_root, BROWSER.rel_admin_root, source))
+        sys.exit(0)
     if len(sys.argv) >= 2 and sys.argv[1] == "--files-token":
         token, source = BROWSER.rotate_token() if "--rotate" in sys.argv else BROWSER.ensure_token()
         print(token)
