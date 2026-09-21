@@ -47,7 +47,11 @@ async function load() {
     }
 
     rows("services", d.services, (s) => [
-      s.name, s.pid ?? "<span class='dim'>—</span>", s.ports.join(", "),
+      s.name + ((s.links && s.links.length)
+        ? "<br><span class='dim'>" + s.links.map((l) =>
+            "<a href='" + l.path + "'>" + l.label + "</a>").join(" · ") + "</span>"
+        : ""),
+      s.pid ?? "<span class='dim'>—</span>", s.ports.join(", "),
       s.healthy ? "<span class='ok'>up</span>" : "<span class='bad'>down</span>"
     ]);
     rows("routes", d.routes, (r) => [

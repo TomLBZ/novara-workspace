@@ -141,6 +141,10 @@ def collect_services() -> list:
             "healthy": health,
             "log": spec.get("log", ""),
             "url": links.get(name),      # 经网关可达的相对路径（dashboard 上可点，不再是纯文本）
+            # 该服务自己声明的子路由（如 quotagent 的双方视角/运维/系统管理）——
+            # 用户要求"不同 routes 提供双方各自可见的 UI，而不是只有一条 dashboard route"
+            "links": [dict(x) for x in (spec.get("settings", {}) or {}).get("subroutes", [])
+                      if isinstance(x, dict) and x.get("label") and x.get("path")],
         })
     return out
 
