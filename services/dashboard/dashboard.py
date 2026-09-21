@@ -124,7 +124,14 @@ def routes_via_service(ports, prefix, timeout: float = 2.0):
             p = str(r.get("path") or "")
             if not p or "<" in p:
                 continue
-            out.append({"label": str(r.get("what") or p), "path": p})
+            kind = "page" if p.endswith("/") else ("api" if "/api/" in p else "other")
+            label = str(r.get("what") or p)
+            # 短标签：取声明文案的第一个分句（顿号/冒号/括号前），避免把整句说明塞进链接
+            for sep in ("：", ":", "（", "(", "——", "；", ";"):
+                if sep in label:
+                    label = label.split(sep, 1)[0]
+            label = label.strip()[:20] or p
+            out.append({"label": label, "path": p, "kind": kind, "full_label": str(r.get("what") or p)})
         return out, ""
     return [], "routes-unreachable"
 
@@ -176,7 +183,9 @@ def collect_services() -> list:
             "url": links.get(name),      # 经网关可达的相对路径（dashboard 上可点，不再是纯文本）
             # 子路由链接**由服务自己声明**（读它的 /api/routes），dashboard 不写死任何服务名；
             # 用户要求"不同 routes 提供双方各自可见的 UI，而不是只有一条 dashboard route"。
-            "links": sub_links,
+            # 页面路由（以 / 结尾）与接口路由**分栏**：页面在前（人点得动），接口另置一栏不混进去
+            "links": [l for l in sub_links if l.get("kind") == "page"],
+            "api_links": [l for l in sub_links if l.get("kind") != "page"],
             "links_source": ("service:/api/routes" if sub_links else (sub_reason or "none")),
         })
     return out
