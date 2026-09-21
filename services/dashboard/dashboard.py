@@ -55,6 +55,41 @@ PID_FILE = pathlib.Path(os.environ.get("WS_PID_FILE", str(WS_ROOT / "runtime" / 
 STARTED = time.time()
 
 
+_MANIFEST_CACHE = {"mtime": None, "data": MANIFEST}
+
+
+def manifest() -> dict:
+    """清单按 mtime 重读。
+
+    实测根因：dashboard 进程 9/16 启动、9/21 才在 services.json 里加 quotagent →
+    模块级 MANIFEST 永不重读 → 新服务**永远**不出现在 dashboard 上（"不存在"而不是"变红"）。
+    坏清单不覆盖好清单：宁可继续显示旧的，也不要整页空掉。
+    """
+    path = sm.path(WS_ROOT)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return _MANIFEST_CACHE["data"]
+    if mtime != _MANIFEST_CACHE["mtime"]:
+        try:
+            data = sm.load(WS_ROOT)
+            if not sm.problems(data):
+                _MANIFEST_CACHE.update(mtime=mtime, data=data)
+        except sm.ManifestError:
+            pass
+    return _MANIFEST_CACHE["data"]
+
+
+def service_links(m: dict) -> dict:
+    """服务名 → 经网关可达的相对路径（第一条把该服务当目标的代理路由）。"""
+    out = {}
+    for route in (m.get("gateway", {}) or {}).get("routes") or []:
+        if isinstance(route, dict) and route.get("type") == "proxy" and route.get("service"):
+            prefix = str(route.get("prefix") or "/")
+            out.setdefault(str(route["service"]), prefix if prefix.endswith("/") else prefix + "/")
+    return out
+
+
 def read_json(path: pathlib.Path):
     try:
         return json.loads(path.read_text())
@@ -82,8 +117,10 @@ def probe(port: int, path: str = "/healthz", timeout: float = 2.0):
 
 def collect_services() -> list:
     out = []
-    for name in sm.services(MANIFEST):
-        spec = MANIFEST.get(name) or {}
+    m = manifest()
+    links = service_links(m)
+    for name in sm.services(m):
+        spec = m.get(name) or {}
         ports = sm.ports(spec)
         pid_file = WS_ROOT / "runtime" / "run" / f"{name}.pid"
         pid, health = None, False
@@ -103,6 +140,7 @@ def collect_services() -> list:
             "script": spec.get("script", ""),
             "healthy": health,
             "log": spec.get("log", ""),
+            "url": links.get(name),      # 经网关可达的相对路径（dashboard 上可点，不再是纯文本）
         })
     return out
 

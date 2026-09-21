@@ -16,6 +16,12 @@
         "root": "services/sites/hello"
       },
       {
+        "prefix": "/quotagent",
+        "type": "proxy",
+        "service": "quotagent",
+        "note": "quotagent 双方视角（承包商 / 供应商）"
+      },
+      {
         "prefix": "/",
         "type": "proxy",
         "service": "dashboard"
@@ -39,6 +45,20 @@
         "max_raw_bytes": 1048576,
         "deny_extra": []
       }
+    }
+  },
+  "quotagent": {
+    "script": "projects/quotagent/tools/webui-serve.py",
+    "port": 8093,
+    "health": "/api/health",
+    "log": "logs/quotagent.log",
+    "settings": {
+      "route_prefix": "/quotagent",
+      "views": [
+        "contractor",
+        "supplier"
+      ],
+      "note": "quotagent 双方视角 WebUI（cordis 插件 webui；每方视角读自己的账本）"
     }
   }
 }
