@@ -97,6 +97,37 @@ def read_json(path: pathlib.Path):
         return None
 
 
+
+def routes_via_service(ports, prefix, timeout: float = 2.0):
+    """服务**自己声明**的路由表：GET <prefix>/api/routes → [{"label","path"}]。
+
+    拿不到就如实返回原因（`routes-unreachable` / `routes-not-json` / `no-prefix`），绝不猜也绝不编。
+    只收 GET + auth=none 且路径里没有占位符的路由（其余是给程序调用或需要会话的）。
+    """
+    if not prefix:
+        return [], "no-prefix"
+    path = str(prefix).rstrip("/") + "/api/routes"
+    for port in ports:
+        ok, body = probe(port, path, timeout)
+        if not ok:
+            continue
+        try:
+            data = json.loads(body)
+        except Exception:
+            return [], "routes-not-json"
+        out = []
+        for r in (data.get("routes") or []):
+            if not isinstance(r, dict):
+                continue
+            if str(r.get("method", "GET")) != "GET" or r.get("auth") not in (None, "", "none"):
+                continue
+            p = str(r.get("path") or "")
+            if not p or "<" in p:
+                continue
+            out.append({"label": str(r.get("what") or p), "path": p})
+        return out, ""
+    return [], "routes-unreachable"
+
 def probe(port: int, path: str = "/healthz", timeout: float = 2.0):
     """Return (ok, body) for a plain HTTP GET on loopback."""
     try:
@@ -133,6 +164,8 @@ def collect_services() -> list:
             if ok:
                 health = True
                 break
+        prefix = links.get(name) or ""
+        sub_links, sub_reason = routes_via_service(ports, prefix)
         out.append({
             "name": name,
             "pid": pid if pid and _alive(pid) else None,
@@ -141,10 +174,10 @@ def collect_services() -> list:
             "healthy": health,
             "log": spec.get("log", ""),
             "url": links.get(name),      # 经网关可达的相对路径（dashboard 上可点，不再是纯文本）
-            # 该服务自己声明的子路由（如 quotagent 的双方视角/运维/系统管理）——
-            # 用户要求"不同 routes 提供双方各自可见的 UI，而不是只有一条 dashboard route"
-            "links": [dict(x) for x in (spec.get("settings", {}) or {}).get("subroutes", [])
-                      if isinstance(x, dict) and x.get("label") and x.get("path")],
+            # 子路由链接**由服务自己声明**（读它的 /api/routes），dashboard 不写死任何服务名；
+            # 用户要求"不同 routes 提供双方各自可见的 UI，而不是只有一条 dashboard route"。
+            "links": sub_links,
+            "links_source": ("service:/api/routes" if sub_links else (sub_reason or "none")),
         })
     return out
 
