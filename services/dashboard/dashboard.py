@@ -23,6 +23,7 @@ import json
 import os
 import pathlib
 import platform
+import re
 import socket
 import socketserver
 import sys
@@ -97,6 +98,43 @@ def read_json(path: pathlib.Path):
         return None
 
 
+# 短标签上限（字符数，可调）。量级就是 20 上下：够短，不至于把整句说明塞进链接。
+# 取 24（而不是 20）的原因——这是"按词边界裁剪"下最小的够用值：
+#   20 会让 `contractor 道的 approvals` 与 `contractor 道的 evidence` 双双退化成 `contractor 道的…`
+#   ——两个**不同**的链接标签文案一模一样（换了个毛病）。24 让常见标签整词落下，
+#   只剩 `supplier 道的 clarifications`（26 字符）退化成 `supplier 道的…`（在同栏里仍唯一）。
+LABEL_LIMIT = 24
+
+# 服务声明文案里"第一分句"的切分符（顿号/冒号/括号/破折号/分号前切开）
+LABEL_SEPARATORS = ("：", ":", "（", "(", "——", "；", ";")
+
+
+def short_label(text: str, limit: int = LABEL_LIMIT) -> str:
+    """把服务声明的文案裁成短标签：先取第一个分句，再**在词边界**上裁剪。
+
+    规则（顺序不能反）：
+      1. 在 `：`/`:`/`（`/`(`/`——`/`；`/`;` 处切开，只留首段（避免把整句说明塞进链接）；
+      2. 超出上限时按**词边界**裁剪：词 = 空白或 `/` 分隔的片段，逐词累加，
+         下一个词会让长度超上限就**停在上一个词的词尾**（补 `…` 明示"这里被裁过"），
+         绝不把英文单词切成 `heur` / `approv` 这种半截形态。
+    唯一退化路径：首段没有任何分隔符、本身就是单个超长词 —— 无法在词边界停下，
+    这时才截到上限并补 `…`（用 `…` 明示，而不是静默硬切）。
+
+    注意：`path`（链接目标）**不经过这里**，永远原样输出。返回空串时调用方回退用 path 当标签。
+    """
+    seg = str(text or "").strip()
+    for sep in LABEL_SEPARATORS:
+        if sep in seg:
+            seg = seg.split(sep, 1)[0]
+    seg = seg.strip()
+    if len(seg) <= limit:
+        return seg
+    ends = [m.end() for m in re.finditer(r"[^\s/]+", seg)]  # 每个词的结束下标
+    keep = next((e for e in reversed(ends) if e <= limit), None)
+    if keep is None:  # 首段无分隔符（单个超长词）：只能硬边界，用 `…` 明示
+        return seg[:limit] + "…"
+    return seg[:keep] + "…"
+
 
 def routes_via_service(ports, prefix, timeout: float = 2.0):
     """服务**自己声明**的路由表：GET <prefix>/api/routes → [{"label","path"}]。
@@ -125,13 +163,10 @@ def routes_via_service(ports, prefix, timeout: float = 2.0):
             if not p or "<" in p:
                 continue
             kind = "page" if p.endswith("/") else ("api" if "/api/" in p else "other")
-            label = str(r.get("what") or p)
-            # 短标签：取声明文案的第一个分句（顿号/冒号/括号前），避免把整句说明塞进链接
-            for sep in ("：", ":", "（", "(", "——", "；", ";"):
-                if sep in label:
-                    label = label.split(sep, 1)[0]
-            label = label.strip()[:20] or p
-            out.append({"label": label, "path": p, "kind": kind, "full_label": str(r.get("what") or p)})
+            raw = str(r.get("what") or p)
+            # 短标签：先取第一个分句，再按词边界裁剪（见 short_label）——不产生断词
+            label = short_label(raw) or p
+            out.append({"label": label, "path": p, "kind": kind, "full_label": raw})
         return out, ""
     return [], "routes-unreachable"
 
