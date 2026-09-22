@@ -5,7 +5,7 @@ Operations dashboard for the novara workspace: the page served at
 repo (`AGENTS.md` rule 7) — components that belong to a user project live under `projects/` in their
 own repos instead.
 
-* `dashboard.py` — stdlib HTTP app: serves the UI, `/api/status` (services, routes, watchers,
+* `dashboard.py` — stdlib HTTP app: serves the UI, `/api/status` (services, projects, routes, watchers,
   container stats, recent requests), `/api/health` and the `/api/files/*` file browser; implements
   `--healthz PORT`.
 * `files.py` — the read-only file-browser backend (scopes, deny list, previews, admin token).
@@ -15,6 +15,34 @@ own repos instead.
   opts out of Cloudflare Rocket Loader).
 * `tests/` — `test_files.py` (backend units) and `test_http.py` (end-to-end over a scratch port);
   `tools/verify.sh` runs both.
+
+## Services vs projects & routes (the wiring)
+
+Two different things live on the page, and each has exactly one source:
+
+* **Services** — one row per manifest entry: name, `pid`, ports, `url`, health and a one-line
+  `description`. A service's `links` array is **intentionally empty** (the key is kept so older
+  readers don't break): project sub-pages do not belong in the service list. Endpoint links
+  (`api_links`) stay, but the UI tucks them into a collapsed `<details>` — detail, not the list's
+  main visual, and the reason an endpoint list is empty is printed (`links_source`:
+  `service:/api/routes` / `routes-unreachable` / `routes-not-json` / `no-prefix` / `none`).
+* **Projects & routes** — one **route entry per independently running webui app**
+  (`projects[]` in `/api/status`): its own name, its entry prefix (e.g. `/quotagent/`), an
+  "独立 app" badge, plus its sub-pages and endpoints as collapsible secondary links. Below it, the
+  router's own route table (`routes[]`, from the manifest).
+
+`projects[]` is **derived, never hardcoded**: a candidate is any service with its own gateway
+prefix (≠ `/`), and the entry's name/prefix come from that service's **own** self-declaration in
+`GET <prefix>/api/routes` — e.g. quotagent answers `{"service": "quotagent-webui", "route_prefix":
+"/quotagent", "source": "host/modules/webui.mjs", "routes": [...]}`. `entry_source` / `name_source`
+record who supplied each value; a service that cannot be reached still gets an entry, but with
+`kind: "unverified"` and `routes_source` naming the reason — the dashboard reports, it does not guess.
+Adding a webui app therefore needs no dashboard change: register it in the manifest with its own
+prefix and have it answer `/api/routes`.
+
+New `/api/status` service fields: `description`, `endpoints` (all routes the service declared),
+`app` (the service's own self-declaration). New top-level field: `projects`. Removed/renamed fields:
+none.
 
 ## File browser (read-only)
 

@@ -19,8 +19,70 @@ async function pingPublic(url) {
 
 function rows(tableId, data, cells) {
   const tb = $(tableId).querySelector("tbody");
+  const span = $(tableId).querySelectorAll("thead th").length || 4;
   tb.innerHTML = data.map((row) => "<tr>" + cells(row).map((c) => "<td>" + c + "</td>").join("") + "</tr>").join("")
-    || "<tr><td colspan='4' class='dim'>none</td></tr>";
+    || "<tr><td colspan='" + span + "' class='dim'>none</td></tr>";
+}
+
+/* Links are only ever rendered from what a service itself declares
+ * (`/api/status` → links/api_links/endpoints, sourced from that service's own
+ * `GET <prefix>/api/routes`). Empty list → "" so the caller can show a dash. */
+function linkList(items) {
+  return (items || []).map((l) =>
+    "<a href='" + esc(l.path) + "' title='" + esc(l.full_label || l.label) + "'>" + esc(l.label) + "</a>"
+  ).join(" · ");
+}
+
+/* Collapsed by default: service/project link lists are detail, never the list's main visual. */
+function fold(summary, items) {
+  if (!(items || []).length) return "";
+  return "<details><summary>" + esc(summary + " " + items.length) + "</summary>" +
+    "<div class='links dim'>" + linkList(items) + "</div></details>";
+}
+
+function serviceDetail(s) {
+  const apis = s.api_links || [];
+  const out = [fold("接口", apis) || "<span class='dim'>—</span>"];
+  // why the endpoint list is empty (no-prefix / routes-unreachable / none) — reported, not guessed.
+  // Only for services that have their own entry prefix: without one there was nothing to read.
+  if (!apis.length && s.url) out.push("<div class='dim'>" + esc(s.links_source || "none") + "</div>");
+  return out.join("");
+}
+
+function badge(text, cls) {
+  return "<span class='badge" + (cls ? " " + cls : "") + "'>" + esc(text) + "</span>";
+}
+
+/* Projects & routes: one entry per independently running webui app.
+ * name/prefix/sub-pages all come from that app's own `/api/routes` self-declaration
+ * (see collect_projects in dashboard.py) — nothing is hardcoded here. */
+function projectCard(p) {
+  const isApp = p.kind === "webui-app";
+  const head = "<div class='proj-head'>" +
+    "<a class='proj-entry' href='" + esc(p.entry) + "'>" + esc(p.name) + "</a>" +
+    badge(isApp ? "独立 app" : "入口未自述", isApp ? "app" : "warn") +
+    badge("入口 " + p.entry, "path") +
+    (p.healthy ? "<span class='ok'>up</span>" : "<span class='bad'>down</span>") +
+    "</div>";
+  const meta = "<div class='proj-meta dim'>service " + esc(p.service) +
+    " · port " + (p.ports || []).join(",") +
+    (p.declared_by ? " · 自述者 " + esc(p.declared_by) : "") +
+    " · 入口来源 " + esc(p.entry_source || "—") +
+    " · 名称来源 " + esc(p.name_source || "—") +
+    " · routes " + esc(p.routes_source || "—") +
+    ((p.views || []).length ? " · 视角 " + esc(p.views.join("/")) : "") + "</div>";
+  return "<div class='proj'>" + head + meta +
+    (isApp ? "" : "<div class='dim'>入口数据拿不到（" + esc(p.routes_source || "none") + "）— 不猜不编</div>") +
+    fold("子页面", p.entries) + fold("接口", p.apis) + "</div>";
+}
+
+function renderProjects(projects) {
+  if (!Array.isArray(projects)) {
+    $("projects").innerHTML = "<div class='dim'>this page expects <code>projects[]</code> in /api/status — the API returned none (stale build?)</div>";
+    return;
+  }
+  $("projects").innerHTML = projects.map(projectCard).join("") ||
+    "<div class='dim'>no independently running webui app found (a candidate needs its own gateway prefix and a route table it declares itself)</div>";
 }
 
 async function load() {
@@ -47,13 +109,15 @@ async function load() {
     }
 
     rows("services", d.services, (s) => [
-      s.name + ((s.links && s.links.length)
-        ? "<br><span class='dim'>" + s.links.map((l) =>
-            "<a href='" + l.path + "'>" + l.label + "</a>").join(" · ") + "</span>"
+      "<b>" + esc(s.name) + "</b>" + (s.description
+        ? "<br><span class='dim'>" + esc(s.description) + "</span>"
         : ""),
       s.pid ?? "<span class='dim'>—</span>", s.ports.join(", "),
-      s.healthy ? "<span class='ok'>up</span>" : "<span class='bad'>down</span>"
+      s.url ? "<a href='" + esc(s.url) + "'>" + esc(s.url) + "</a>" : "<span class='dim'>—</span>",
+      s.healthy ? "<span class='ok'>up</span>" : "<span class='bad'>down</span>",
+      serviceDetail(s)
     ]);
+    renderProjects(d.projects);
     rows("routes", d.routes, (r) => [
       "<a href='" + r.link + "'>" + r.prefix + "</a>", r.type, r.target
     ]);

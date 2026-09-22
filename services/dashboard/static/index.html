@@ -35,13 +35,16 @@
 
   <section class="card">
     <h2>Services</h2>
-    <table id="services"><thead><tr><th>service</th><th>pid</th><th>ports</th><th>health</th></tr></thead><tbody></tbody></table>
+    <table id="services"><thead><tr><th>service</th><th>pid</th><th>ports</th><th>url</th><th>health</th><th>detail</th></tr></thead><tbody></tbody></table>
+    <p class="hint">what belongs to a service: name, health, port, url, one-line description. Sub-pages of a project are <b>not</b> listed here — they hang off the project's route entry below.</p>
   </section>
 
-  <section class="card">
+  <section class="card wide" id="card-projects">
     <h2>Projects &amp; routes</h2>
+    <div id="projects" class="projects"><div class="dim">loading…</div></div>
+    <h3>gateway routes</h3>
     <table id="routes"><thead><tr><th>path</th><th>type</th><th>target</th></tr></thead><tbody></tbody></table>
-    <p class="hint">add a service by editing <code>services/gateway/routes.json</code>, then <code>ws-gateway restart</code></p>
+    <p class="hint">every entry above is read from that app's own <code>GET &lt;prefix&gt;/api/routes</code> — nothing here is hardcoded; when an app declares no route table the entry says so instead of guessing. The table is the router's route list (<code>services/services.json</code> → <code>gateway.routes</code>).</p>
   </section>
 
   <section class="card wide" id="card-files">
