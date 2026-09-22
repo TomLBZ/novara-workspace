@@ -29,21 +29,7 @@ tr:last-child td { border-bottom:0; }
 pre { margin:0; max-height:260px; overflow:auto; font-size:.78rem; color:#c9d1d9; white-space:pre-wrap; }
 code { background:#131c26; padding:.1rem .35rem; border-radius:5px; }
 .hint { color:var(--dim); font-size:.78rem; margin:.7rem 0 0; }
-h3 { font-size:.72rem; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin:1.1rem 0 .45rem; font-weight:600; }
 .error { margin:1rem 1.5rem 0; padding:.7rem 1rem; border:1px solid #5c2b2b; background:#1d1013; color:#ffb4ad; border-radius:10px; font-size:.88rem; }
-
-/* projects & routes */
-.projects { display:flex; flex-direction:column; gap:.6rem; }
-.proj { border:1px solid var(--line); border-radius:10px; padding:.6rem .7rem; background:#0c1219; }
-.proj-head { display:flex; align-items:center; gap:.5rem; flex-wrap:wrap; }
-.proj-entry { font-size:1rem; font-weight:600; }
-.proj-meta { font-size:.75rem; margin-top:.25rem; overflow-wrap:anywhere; }
-.badge { font-size:.66rem; text-transform:uppercase; letter-spacing:.06em; padding:.15rem .5rem; border-radius:999px; border:1px solid var(--line); color:var(--dim); white-space:nowrap; }
-.badge.app { color:#08130a; background:#79c0ff; border-color:#79c0ff; }   /* 独立 app */
-.badge.warn { color:#ffd7a8; border-color:#5c3b1e; }
-.badge.path { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; text-transform:none; letter-spacing:0; color:var(--fg); }
-summary { cursor:pointer; color:var(--dim); font-size:.78rem; }
-.links { font-size:.78rem; margin:.3rem 0 .1rem; overflow-wrap:anywhere; }
 
 /* files panel */
 .grow { flex:1 1 auto; }

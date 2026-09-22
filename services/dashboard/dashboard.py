@@ -23,7 +23,6 @@ import json
 import os
 import pathlib
 import platform
-import re
 import socket
 import socketserver
 import sys
@@ -55,17 +54,13 @@ STATIC = HERE / "static"
 PID_FILE = pathlib.Path(os.environ.get("WS_PID_FILE", str(WS_ROOT / "runtime" / "run" / "dashboard.pid")))
 STARTED = time.time()
 
-
+# 清单按 mtime 重读（服务发现的基本盘，不是"往服务列表里塞字段"）。
+# 实测根因：进程 9/16 启动、9/21 才在 services.json 里加 quotagent → 模块级 MANIFEST 永不重读 →
+# 新服务**永远**不出现在 dashboard 上（"不存在"而不是"变红"）。坏清单不覆盖好清单。
 _MANIFEST_CACHE = {"mtime": None, "data": MANIFEST}
 
 
 def manifest() -> dict:
-    """清单按 mtime 重读。
-
-    实测根因：dashboard 进程 9/16 启动、9/21 才在 services.json 里加 quotagent →
-    模块级 MANIFEST 永不重读 → 新服务**永远**不出现在 dashboard 上（"不存在"而不是"变红"）。
-    坏清单不覆盖好清单：宁可继续显示旧的，也不要整页空掉。
-    """
     path = sm.path(WS_ROOT)
     try:
         mtime = path.stat().st_mtime
@@ -81,108 +76,12 @@ def manifest() -> dict:
     return _MANIFEST_CACHE["data"]
 
 
-def service_links(m: dict) -> dict:
-    """服务名 → 经网关可达的相对路径（第一条把该服务当目标的代理路由）。"""
-    out = {}
-    for route in (m.get("gateway", {}) or {}).get("routes") or []:
-        if isinstance(route, dict) and route.get("type") == "proxy" and route.get("service"):
-            prefix = str(route.get("prefix") or "/")
-            out.setdefault(str(route["service"]), prefix if prefix.endswith("/") else prefix + "/")
-    return out
-
-
 def read_json(path: pathlib.Path):
     try:
         return json.loads(path.read_text())
     except Exception:
         return None
 
-
-# 短标签上限（字符数，可调）。量级就是 20 上下：够短，不至于把整句说明塞进链接。
-# 取 24（而不是 20）的原因——这是"按词边界裁剪"下最小的够用值：
-#   20 会让 `contractor 道的 approvals` 与 `contractor 道的 evidence` 双双退化成 `contractor 道的…`
-#   ——两个**不同**的链接标签文案一模一样（换了个毛病）。24 让常见标签整词落下，
-#   只剩 `supplier 道的 clarifications`（26 字符）退化成 `supplier 道的…`（在同栏里仍唯一）。
-LABEL_LIMIT = 24
-
-# 服务声明文案里"第一分句"的切分符（顿号/冒号/括号/破折号/分号前切开）
-LABEL_SEPARATORS = ("：", ":", "（", "(", "——", "；", ";")
-
-
-def short_label(text: str, limit: int = LABEL_LIMIT) -> str:
-    """把服务声明的文案裁成短标签：先取第一个分句，再**在词边界**上裁剪。
-
-    规则（顺序不能反）：
-      1. 在 `：`/`:`/`（`/`(`/`——`/`；`/`;` 处切开，只留首段（避免把整句说明塞进链接）；
-      2. 超出上限时按**词边界**裁剪：词 = 空白或 `/` 分隔的片段，逐词累加，
-         下一个词会让长度超上限就**停在上一个词的词尾**（补 `…` 明示"这里被裁过"），
-         绝不把英文单词切成 `heur` / `approv` 这种半截形态。
-    唯一退化路径：首段没有任何分隔符、本身就是单个超长词 —— 无法在词边界停下，
-    这时才截到上限并补 `…`（用 `…` 明示，而不是静默硬切）。
-
-    注意：`path`（链接目标）**不经过这里**，永远原样输出。返回空串时调用方回退用 path 当标签。
-    """
-    seg = str(text or "").strip()
-    for sep in LABEL_SEPARATORS:
-        if sep in seg:
-            seg = seg.split(sep, 1)[0]
-    seg = seg.strip()
-    if len(seg) <= limit:
-        return seg
-    ends = [m.end() for m in re.finditer(r"[^\s/]+", seg)]  # 每个词的结束下标
-    keep = next((e for e in reversed(ends) if e <= limit), None)
-    if keep is None:  # 首段无分隔符（单个超长词）：只能硬边界，用 `…` 明示
-        return seg[:limit] + "…"
-    return seg[:keep] + "…"
-
-
-def routes_via_service(ports, prefix, timeout: float = 2.0):
-    """服务**自己声明**的路由表：GET <prefix>/api/routes → [{"label","path",...}]。
-
-    返回 `(routes, reason, declared)`：
-      * `routes`   —— 收下的路由（只收 GET + auth=none 且路径里没有占位符的）；
-      * `reason`   —— 拿不到的原因（`routes-unreachable` / `routes-not-json` / `no-prefix`），拿到了就是 ""；
-      * `declared` —— 服务在**同一份响应**里的自述元数据（`service` / `route_prefix` / `source` / 描述）。
-                      projects & routes 区的入口数据只认它：dashboard 不写死服务名，也不写死路由。
-
-    拿不到就如实返回原因，绝不猜也绝不编。
-    """
-    if not prefix:
-        return [], "no-prefix", {}
-    path = str(prefix).rstrip("/") + "/api/routes"
-    for port in ports:
-        ok, body = probe(port, path, timeout)
-        if not ok:
-            continue
-        try:
-            data = json.loads(body)
-        except Exception:
-            return [], "routes-not-json", {}
-        if not isinstance(data, dict):
-            return [], "routes-not-json", {}
-        declared = {
-            "service": str(data.get("service") or ""),
-            "route_prefix": str(data.get("route_prefix") or ""),
-            "source": str(data.get("source") or ""),
-            "description": str(data.get("desc") or data.get("note") or ""),
-            "views": data.get("views") if isinstance(data.get("views"), list) else [],
-        }
-        out = []
-        for r in (data.get("routes") or []):
-            if not isinstance(r, dict):
-                continue
-            if str(r.get("method", "GET")) != "GET" or r.get("auth") not in (None, "", "none"):
-                continue
-            p = str(r.get("path") or "")
-            if not p or "<" in p:
-                continue
-            kind = "page" if p.endswith("/") else ("api" if "/api/" in p else "other")
-            raw = str(r.get("what") or p)
-            # 短标签：先取第一个分句，再按词边界裁剪（见 short_label）——不产生断词
-            label = short_label(raw) or p
-            out.append({"label": label, "path": p, "kind": kind, "full_label": raw})
-        return out, "", declared
-    return [], "routes-unreachable", {}
 
 def probe(port: int, path: str = "/healthz", timeout: float = 2.0):
     """Return (ok, body) for a plain HTTP GET on loopback."""
@@ -205,7 +104,6 @@ def probe(port: int, path: str = "/healthz", timeout: float = 2.0):
 def collect_services() -> list:
     out = []
     m = manifest()
-    links = service_links(m)
     for name in sm.services(m):
         spec = m.get(name) or {}
         ports = sm.ports(spec)
@@ -220,9 +118,6 @@ def collect_services() -> list:
             if ok:
                 health = True
                 break
-        prefix = links.get(name) or ""
-        sub_links, sub_reason, declared = routes_via_service(ports, prefix)
-        apis = [l for l in sub_links if l.get("kind") != "page"]
         out.append({
             "name": name,
             "pid": pid if pid and _alive(pid) else None,
@@ -230,90 +125,8 @@ def collect_services() -> list:
             "script": spec.get("script", ""),
             "healthy": health,
             "log": spec.get("log", ""),
-            "url": links.get(name),      # 经网关可达的相对路径（dashboard 上可点，不再是纯文本）
-            # 一句话描述：服务自述优先，其次清单里它自己的 note；都没有就留空（不编）。
-            "description": service_description(spec, declared, sub_links),
-            # **兼容字段，故意留空**：服务列表不再承载项目的子页面链接 ——
-            # 子页面已归位到 projects & routes 区的**项目路由入口**（见 collect_projects），
-            # 列表主视觉只剩 名称/健康/端口/URL/一句话描述。键名保留（删字段是破坏性改动），
-            # 只保证"不再往里塞东西"：老读端拿到的是空数组，不是缺失的键。
-            "links": [],
-            # 接口链接：运维确实要看（排障时比 health 更细），但**不作为列表主视觉** ——
-            # 前端把它收进该服务的 <details> 里。语义与旧版一致，未删未改名。
-            "api_links": apis,
-            "links_source": ("service:/api/routes" if sub_links else (sub_reason or "none")),
-            # 新增：该服务自述的全部路由（页面 + 接口），供前端展开详情用。
-            "endpoints": sub_links,
-            # 新增：服务自述的 app 元数据（service / route_prefix / source / description / views）。
-            # 拿不到服务自述时是 {}，原因见 links_source —— 不猜也不编。
-            "app": declared,
         })
     return out
-
-
-def service_description(spec: dict, declared: dict, routes: list) -> str:
-    """服务列表里的**一句话描述**（短标签，不是整段文档）。
-
-    来源顺序（都是"它自己说的"，dashboard 不编）：
-      1. 服务 `GET <prefix>/api/routes` 响应里的 `desc`/`note`（运行期自述，最新）；
-      2. 清单里该服务自己的 `desc`/`note`，再退到 `settings.desc`/`settings.note`；
-      3. 服务自述的第一条**页面**路由的 `what`（只取第一分句，与链接标签同一套裁剪）；
-    都没有就返回 ""，前端显示 `—`。绝不从脚本路径反推文案。
-    """
-    for text in (declared.get("description"), spec.get("desc"), spec.get("note"),
-                 (spec.get("settings") or {}).get("desc") if isinstance(spec.get("settings"), dict) else None,
-                 (spec.get("settings") or {}).get("note") if isinstance(spec.get("settings"), dict) else None):
-        if text:
-            return short_label(text)
-    for route in routes or []:
-        if route.get("kind") == "page" and route.get("full_label"):
-            return short_label(route["full_label"])
-    return ""
-
-
-def collect_projects(services: list) -> list:
-    """**项目路由入口**：每个独立运行的 webui app 一条（projects & routes 区的主内容）。
-
-    判定与命名**全部从数据里取**，dashboard 不写死任何服务名、也不写死任何路由：
-      * 候选 —— 在网关路由表里拥有**自己的入口前缀**的服务（即 `service_links` 给出的 url），
-                排除 `/`（那正是 dashboard 自己，不是项目）；
-      * 名字 —— 服务自述的 `service`（例如 `quotagent-webui`），缺失时退回清单里的服务名，
-                谁给的写在 `name_source` 里；
-      * 入口 —— 服务自述的 `route_prefix`（例如 `/quotagent` → 入口 `/quotagent/`），
-                缺失时退回清单里的代理前缀，谁给的写在 `entry_source` 里；
-      * 来源 —— 一律是服务自己的 `GET <prefix>/api/routes`（单一真源）。
-    拿不到自述时该条**照常出现**，但 `kind="unverified"`、`declared_by=""` 且
-    `routes_source` 里写明原因（如 `routes-unreachable`）—— 如实报告，不猜不编。
-    """
-    rows = []
-    for svc in services or []:
-        url = str(svc.get("url") or "")
-        if not url or url == "/":
-            continue                              # dashboard 自己没有"项目入口"
-        declared = svc.get("app") or {}
-        prefix = str(declared.get("route_prefix") or url.rstrip("/"))
-        entry = prefix if prefix.endswith("/") else prefix + "/"
-        endpoints = svc.get("endpoints") or []
-        pages = [l for l in endpoints if l.get("kind") == "page"]
-        rows.append({
-            "name": declared.get("service") or svc.get("name"),
-            "service": svc.get("name"),           # 清单里的服务名（数据驱动的关联键）
-            "kind": "webui-app" if declared.get("route_prefix") else "unverified",
-            "prefix": prefix,
-            "entry": entry,
-            "entry_source": "service:/api/routes" if declared.get("route_prefix")
-                            else "manifest:gateway.routes.prefix",
-            "name_source": "service:/api/routes" if declared.get("service") else "manifest:services",
-            "declared_by": declared.get("source") or "",
-            "views": declared.get("views") or [],
-            "healthy": svc.get("healthy"),
-            "ports": svc.get("ports") or [],
-            "routes_source": svc.get("links_source") or "none",
-            "pages": pages,                       # 全部页面路由（含入口自己）
-            "entries": [l for l in pages if l.get("path") != entry],   # 入口下的次要链接
-            "apis": [l for l in endpoints if l.get("kind") != "page"],
-        })
-    return rows
 
 
 def _alive(pid: int) -> bool:
@@ -324,20 +137,86 @@ def _alive(pid: int) -> bool:
         return False
 
 
-def collect_routes() -> list:
-    """The router's route table, resolved from the manifest (a `service` target -> its port)."""
+ENTRY_FROM_SERVICE = "service:/api/routes"
+ENTRY_FROM_MANIFEST = "manifest:gateway.routes.prefix"
+
+
+def port_open(port, timeout: float = 1.0) -> bool:
+    """该端口上有没有东西在应答（用来区分"服务不可达"与"服务活着但没有路由表"）。"""
     try:
-        routes = sm.routes(MANIFEST)
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def entry_via_service(m: dict, service, prefix: str, timeout: float = 2.0):
+    """一条网关路由的**唯一入口路径**。
+
+    声明方式只有一个（见 README「Services vs. projects & routes」）：服务自己声明的
+    `GET <prefix>/api/routes` 里**第一个 `path` 以 `/` 结尾且等于前缀本尊**的路由
+    （`/quotagent` → `/quotagent/`）。返回 `(entry, entry_source)`。
+
+    子页面（`/quotagent/start/` …）与 `/api/*` 路由**故意不读进这一层**：一个 app 的子页面是
+    它自己的责任，入口只声明入口。拿不到就返回 `(None, 原因)`，原因如实写进 `entry_source`，
+    不猜也不编（这层里没有任何"从子路由反推入口"的逻辑）：
+
+      * `no-route-table`   —— 服务活着，但它在 `<prefix>/api/routes` 上没有自述路由表（如 dashboard 自己）；
+      * `routes-not-json`  —— 有应答但不是 JSON；
+      * `entry-not-declared` —— 路由表里没有"等于前缀本尊"的那一条；
+      * `routes-unreachable` —— 该服务的端口上没有任何应答。
+    """
+    prefix = str(prefix or "/")
+    if service:
+        spec = (m.get(service) or {}) if isinstance(m, dict) else {}
+        for port in sm.ports(spec):
+            ok, body = probe(port, prefix.rstrip("/") + "/api/routes", timeout)
+            if not ok:
+                if port_open(port):
+                    return None, "no-route-table"
+                continue
+            try:
+                data = json.loads(body)
+            except Exception:
+                return None, "routes-not-json"
+            if not isinstance(data, dict):
+                return None, "routes-not-json"
+            for route in data.get("routes") or []:
+                if not isinstance(route, dict):
+                    continue
+                path = str(route.get("path") or "")
+                if str(route.get("method", "GET")) != "GET" or route.get("auth") not in (None, "", "none"):
+                    continue
+                if path.endswith("/") and path.rstrip("/") == prefix.rstrip("/"):
+                    return path, ENTRY_FROM_SERVICE
+            return None, "entry-not-declared"
+        return None, "routes-unreachable"
+    # 路由后面没有服务（如 static）：没有任何服务可问，路由器自己的前缀就是唯一声明。
+    return (prefix if prefix.endswith("/") else prefix + "/"), ENTRY_FROM_MANIFEST
+
+
+def collect_routes() -> list:
+    """The router's route table — **每行就是一个项目的路由入口**（projects & routes 区的全部内容）。
+
+    每行只保留这个区块原本的字段：`prefix` / `type` / `target` / `link`；
+    新增的 `entry_source` 只用来**如实标注** `link` 是从哪来的（拿不到时的原因就在这里）。
+    入口语义 = "这是一个独立运行的 webui app 的入口" —— 不是子页面清单，也不是接口清单。
+    """
+    m = manifest()
+    try:
+        routes = sm.routes(m)
     except (sm.ManifestError, KeyError):
         routes = []
     rows = []
     for r in routes:
         prefix = r.get("prefix", "/")
+        link, source = entry_via_service(m, r.get("service"), prefix)
         rows.append({
             "prefix": prefix,
             "type": r.get("type"),
             "target": r.get("root") or r.get("upstream"),
-            "link": prefix if prefix.endswith("/") else prefix + "/",
+            "link": link,
+            "entry_source": source,
         })
     return rows
 
@@ -456,7 +335,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except Exception:
                 state = "unknown"
             try:
-                services = collect_services()
                 payload = {
                     "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                     "uptime_s": round(time.time() - STARTED),
@@ -465,10 +343,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         "state": state,
                         "refresh_seconds": CFG.get("refresh_seconds", 5),
                     },
-                    "services": services,
-                    # 项目路由入口：每个独立运行的 webui app 一条，入口数据只来自
-                    # 服务自己声明的 GET <prefix>/api/routes（见 collect_projects）。
-                    "projects": collect_projects(services),
+                    "services": collect_services(),
                     "routes": collect_routes(),
                     "watchers": collect_watchers(),
                     "system": collect_system(),

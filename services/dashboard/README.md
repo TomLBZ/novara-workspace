@@ -5,7 +5,7 @@ Operations dashboard for the novara workspace: the page served at
 repo (`AGENTS.md` rule 7) — components that belong to a user project live under `projects/` in their
 own repos instead.
 
-* `dashboard.py` — stdlib HTTP app: serves the UI, `/api/status` (services, projects, routes, watchers,
+* `dashboard.py` — stdlib HTTP app: serves the UI, `/api/status` (services, routes, watchers,
   container stats, recent requests), `/api/health` and the `/api/files/*` file browser; implements
   `--healthz PORT`.
 * `files.py` — the read-only file-browser backend (scopes, deny list, previews, admin token).
@@ -16,33 +16,35 @@ own repos instead.
 * `tests/` — `test_files.py` (backend units) and `test_http.py` (end-to-end over a scratch port);
   `tools/verify.sh` runs both.
 
-## Services vs projects & routes (the wiring)
+## Services vs. projects & routes (what goes where)
 
-Two different things live on the page, and each has exactly one source:
+Two different things, deliberately kept apart — and both are **minimal by rule**:
 
-* **Services** — one row per manifest entry: name, `pid`, ports, `url`, health and a one-line
-  `description`. A service's `links` array is **intentionally empty** (the key is kept so older
-  readers don't break): project sub-pages do not belong in the service list. Endpoint links
-  (`api_links`) stay, but the UI tucks them into a collapsed `<details>` — detail, not the list's
-  main visual, and the reason an endpoint list is empty is printed (`links_source`:
-  `service:/api/routes` / `routes-unreachable` / `routes-not-json` / `no-prefix` / `none`).
-* **Projects & routes** — one **route entry per independently running webui app**
-  (`projects[]` in `/api/status`): its own name, its entry prefix (e.g. `/quotagent/`), an
-  "独立 app" badge, plus its sub-pages and endpoints as collapsible secondary links. Below it, the
-  router's own route table (`routes[]`, from the manifest).
+* **`services`** — each row is only a *service*: `name`, `pid`, `ports`, `script`, `healthy`, `log`.
+  That is the whole field set, and it is the pre-`ac0d9b2` shape. A service row carries **no `url`,
+  no `links`/`api_links`, no page or endpoint lists and no `<details>` expansion**: "services" is not
+  "routes", so it must not advertise any path into a project.
+* **`projects & routes`** — each row is **one project's route entry**, i.e. the front door of an app
+  that runs on its own (`/quotagent` → `/quotagent/`). Rows use only this block's own fields
+  (`prefix`, `type`, `target`, `link`, plus `entry_source`, which exists purely to report where the
+  entry came from). There is **no `projects[]` structure, no widget/card, no sub-page list and no
+  `/api/*` list** here: an app's sub-pages are the app's own responsibility — *a site's entry point
+  must never treat every sub-page as an entry point*.
 
-`projects[]` is **derived, never hardcoded**: a candidate is any service with its own gateway
-prefix (≠ `/`), and the entry's name/prefix come from that service's **own** self-declaration in
-`GET <prefix>/api/routes` — e.g. quotagent answers `{"service": "quotagent-webui", "route_prefix":
-"/quotagent", "source": "host/modules/webui.mjs", "routes": [...]}`. `entry_source` / `name_source`
-record who supplied each value; a service that cannot be reached still gets an entry, but with
-`kind: "unverified"` and `routes_source` naming the reason — the dashboard reports, it does not guess.
-Adding a webui app therefore needs no dashboard change: register it in the manifest with its own
-prefix and have it answer `/api/routes`.
+**The one entry declaration.** A route's clickable entry path comes from exactly one source:
 
-New `/api/status` service fields: `description`, `endpoints` (all routes the service declared),
-`app` (the service's own self-declaration). New top-level field: `projects`. Removed/renamed fields:
-none.
+1. the app behind the route declares it itself — the **first** route in its
+   `GET <prefix>/api/routes` whose `path` ends in `/` and equals the prefix itself
+   (`/quotagent` → `/quotagent/`, from `quotagent-webui`'s own route table). Only that one route is
+   read; the rest of that table (sub-pages, `/api/*`) is never pulled into this layer;
+2. a route with **no service behind it** (e.g. the `static` route `/projects/hello`) has nothing to
+   ask, so the router's own `gateway.routes.prefix` is the only declaration.
+
+Nothing is inferred and nothing is invented: if the app is reachable but has no route table of its
+own (`no-route-table`, e.g. the dashboard itself), answers non-JSON (`routes-not-json`), does not
+declare its prefix (`entry-not-declared`) or does not answer at all (`routes-unreachable`), the
+row's `link` stays `null` — the block never falls back to a guessed path — and the page shows the
+bare prefix as plain text with that reason in its tooltip.
 
 ## File browser (read-only)
 

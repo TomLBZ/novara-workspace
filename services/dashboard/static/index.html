@@ -35,16 +35,17 @@
 
   <section class="card">
     <h2>Services</h2>
-    <table id="services"><thead><tr><th>service</th><th>pid</th><th>ports</th><th>url</th><th>health</th><th>detail</th></tr></thead><tbody></tbody></table>
-    <p class="hint">what belongs to a service: name, health, port, url, one-line description. Sub-pages of a project are <b>not</b> listed here — they hang off the project's route entry below.</p>
+    <table id="services"><thead><tr><th>service</th><th>pid</th><th>ports</th><th>health</th></tr></thead><tbody></tbody></table>
   </section>
 
-  <section class="card wide" id="card-projects">
+  <section class="card">
     <h2>Projects &amp; routes</h2>
-    <div id="projects" class="projects"><div class="dim">loading…</div></div>
-    <h3>gateway routes</h3>
     <table id="routes"><thead><tr><th>path</th><th>type</th><th>target</th></tr></thead><tbody></tbody></table>
-    <p class="hint">every entry above is read from that app's own <code>GET &lt;prefix&gt;/api/routes</code> — nothing here is hardcoded; when an app declares no route table the entry says so instead of guessing. The table is the router's route list (<code>services/services.json</code> → <code>gateway.routes</code>).</p>
+    <p class="hint">one row = <b>one project's route entry</b> — the front door of an app that runs on its own
+      (e.g. <code>/quotagent</code> → <code>/quotagent/</code>). An app's sub-pages and <code>/api/*</code> routes are
+      that app's own business and are <b>not</b> listed here. The entry path is declared by the app itself in its
+      <code>GET &lt;prefix&gt;/api/routes</code> (the first route that ends in <code>/</code> and equals the prefix);
+      when it cannot be read the row shows the prefix as plain text and says why.</p>
   </section>
 
   <section class="card wide" id="card-files">
