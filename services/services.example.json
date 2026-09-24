@@ -22,6 +22,14 @@
         "note": "quotagent 双方视角（承包商 / 供应商）"
       },
       {
+        "prefix": "/vscode",
+        "type": "proxy",
+        "service": "vscode",
+        "websocket": true,
+        "note": "VS Code (code-server): the workbench keeps a websocket open to the extension host",
+        "strip_prefix": true
+      },
+      {
         "prefix": "/",
         "type": "proxy",
         "service": "dashboard"
@@ -59,6 +67,21 @@
         "supplier"
       ],
       "note": "quotagent 双方视角 WebUI（cordis 插件 webui；每方视角读自己的账本）"
+    }
+  },
+  "vscode": {
+    "script": "services/vscode/vscode.py",
+    "port": 8095,
+    "health": "/healthz",
+    "log": "logs/vscode.log",
+    "settings": {
+      "folder": ".",
+      "trusted_origins": [
+        "novara.local.remoteblossom.com",
+        "novara.remoteblossom.com"
+      ],
+      "disable_workspace_trust": true,
+      "note": "VS Code in the browser (code-server); reachable only through ws-gateway on /vscode"
     }
   }
 }

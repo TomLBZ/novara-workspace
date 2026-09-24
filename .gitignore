@@ -8,6 +8,7 @@ config.yaml
 *.env
 config/git-credentials
 config/dashboard-admin-token
+config/vscode-password
 config/keys/
 config/gitconfig
 config/ssh_config

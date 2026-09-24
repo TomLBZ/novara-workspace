@@ -20,10 +20,10 @@
 #
 #  WHERE DO I CHANGE WHAT?
 #    here (config.yaml)      api keys, git credentials + identity, LLM settings,
-#                            and dashboard.admin_token (see the dashboard section)
+#                            dashboard.admin_token and vscode.password (see below)
 #    services/services.json  which services run, their ports / health paths / logs,
 #                            the router's route table, and per-service settings
-#                            (e.g. dashboard.settings.files.*)
+#                            (e.g. dashboard.settings.files.*, vscode.settings.trusted_origins)
 #    Nothing is configured in two files. `ws-config show` redacts secrets; the
 #    manifest is validated by `ws-gateway validate`.
 #
@@ -161,6 +161,20 @@ secrets: {}
 # services/dashboard/dashboard.py --files-token --rotate.
 dashboard:
   admin_token: ""
+
+# --- VS Code in the browser (ws-vscode service) ------------------------------
+# services/services.json -> vscode.settings.trusted_origins lists the hostnames the
+# editor accepts websocket upgrades from: it must contain every host you open
+# /vscode from, otherwise the page loads but the workbench never connects.
+#
+#   password: ""             let the service generate config/vscode-password
+#                            (mode 0600, gitignored) on first start - read it with
+#                            services/vscode/vscode.py --password
+#   password: "<value>"      that exact string is the editor's login password.
+# Rotate with services/vscode/vscode.py --password --rotate.
+vscode:
+  password: ""
+
 
 # --- networking --------------------------------------------------------------
 proxy:

@@ -7,7 +7,7 @@
 # rebuild the runtime/ + venvs/ trees (e.g. after a wipe, or on another arch).
 #
 # Requirements on the host: a POSIX shell, tar, curl, and outbound network to
-# astral.sh / nodejs.org / micro.mamba.pm / conda.anaconda.org / pypi.org.
+# astral.sh / nodejs.org / micro.mamba.pm / conda.anaconda.org / pypi.org / github.com.
 # No root, no system python required.
 #
 #   tools/bootstrap.sh            # full rebuild (skips parts already present)
@@ -24,6 +24,7 @@ UV_VERSION="0.11.6"
 PYTHON_VERSIONS="3.13 3.12"
 NODE_LTS="24.21.0"
 NODE_EXTRA="26.8.2"
+CODE_SERVER_VERSION="4.138.0"
 MICROMAMBA_URL="https://micro.mamba.pm/api/micromamba/linux-64/latest"
 GIT_CHANNEL="conda-forge"
 BASE_PACKAGES="pyyaml requests httpx rich tabulate jsonschema python-dateutil python-dotenv conda-pack"
@@ -110,7 +111,22 @@ PY
   rm -rf "$WS_ROOT/runtime/build"
 fi
 
-# --- 6. heal paths + verify ------------------------------------------------
+# --- 6. code-server (VS Code in the browser, `ws-vscode`) ------------------
+if [ ! -x "$WS_ROOT/runtime/code-server/$CODE_SERVER_VERSION/bin/code-server" ]; then
+  say "installing code-server $CODE_SERVER_VERSION"
+  mkdir -p "$WS_ROOT/runtime/code-server" "$WS_ROOT/runtime/cache/dl"
+  tarball="code-server-$CODE_SERVER_VERSION-linux-amd64.tar.gz"
+  curl -fsSL --retry 3 -o "$WS_ROOT/runtime/cache/dl/$tarball" \
+    "https://github.com/coder/code-server/releases/download/v$CODE_SERVER_VERSION/$tarball"
+  tar -xzf "$WS_ROOT/runtime/cache/dl/$tarball" -C "$WS_ROOT/runtime/code-server"
+  rm -rf "$WS_ROOT/runtime/code-server/$CODE_SERVER_VERSION"
+  mv "$WS_ROOT/runtime/code-server/code-server-$CODE_SERVER_VERSION-linux-amd64" \
+     "$WS_ROOT/runtime/code-server/$CODE_SERVER_VERSION"
+fi
+ln -sfn "$CODE_SERVER_VERSION" "$WS_ROOT/runtime/code-server/current"
+"$WS_ROOT/runtime/code-server/current/bin/code-server" --version
+
+# --- 7. heal paths + verify ------------------------------------------------
 say "relocating + verifying"
 "$WS_ROOT/bin/ws-relocate"
 "$WS_ROOT/tools/verify.sh"
