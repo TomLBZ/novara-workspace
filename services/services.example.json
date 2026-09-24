@@ -1,6 +1,6 @@
 {
   "_about": "Machine-local deployment state: THE single place where the workspace's services are defined - script, ports, health path, log, the router's route table and each service's own settings. This live copy is gitignored machine state; the tracked baseline is services.example.json (a fresh clone copies it over this file).",
-  "_map": "edit HERE for: which services run, their ports, health paths, logs, the gateway route table, and per-service settings (e.g. dashboard.settings). edit ../config.yaml for: API keys, git identity, LLM settings and dashboard.admin_token. Nothing is configured in two files; top-level keys starting with '_' are comments and are ignored by every reader.",
+  "_map": "edit HERE for: which services run, their ports, health paths, logs, the gateway route table, and per-service settings (e.g. dashboard.settings). a proxy route may add \"websocket\": true to carry websocket upgrades on its prefix. edit ../config.yaml for: API keys, git identity, LLM settings and dashboard.admin_token. Nothing is configured in two files; top-level keys starting with '_' are comments and are ignored by every reader.",
   "gateway": {
     "script": "services/gateway/gateway.py",
     "listen": [

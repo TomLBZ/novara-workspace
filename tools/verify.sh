@@ -302,6 +302,21 @@ print(("ok:" + state) if ok else "MISMATCH:%s" % json.dumps(body))
     else
       wrn "services/dashboard/files.py missing - file browser not installed"
     fi
+
+    if [ -d "$WS_ROOT/services/gateway/tests" ]; then
+      for suite in test_http.py test_websocket.py; do
+        local gw_out gw_rc
+        gw_out="$(cd "$WS_ROOT" && python3 "services/gateway/tests/$suite" 2>&1)"; gw_rc=$?
+        if [ "$gw_rc" -eq 0 ]; then
+          ok "gateway $suite: $(printf '%s' "$gw_out" | grep -c '^PASS') checks passed"
+        else
+          bad "gateway $suite failed (rc=$gw_rc)"
+          printf '%s\n' "$gw_out" | grep -E 'FAIL|Traceback|Error' | sed 's/^/      /' | head -8
+        fi
+      done
+    else
+      wrn "services/gateway/tests missing - proxying and websocket upgrades are unverified"
+    fi
   else
     wrn "tools/servicemanifest.py missing - service manifest is not centralised"
   fi

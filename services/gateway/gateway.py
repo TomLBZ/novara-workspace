@@ -11,14 +11,32 @@ for the tracked baseline and `tools/servicemanifest.py` for the reader/validator
     bin/ws-gateway start|stop|status|ensure        # managed
 
 Reserved path: /healthz (never proxied) -> JSON status.
+
+Transport notes, because they decide what a service behind this router can do:
+
+* **Responses stream.**  A proxied body is copied to the client as it arrives, with the
+  upstream's framing preserved: `Content-Length` is relayed as-is, a chunked upstream is
+  re-framed as chunked, and an upstream that says nothing about length gets
+  `Connection: close`.  Long-lived streams (SSE, downloads) therefore work.
+* **Request bodies stream too**, including `Transfer-Encoding: chunked` uploads.
+* **WebSocket upgrades tunnel.**  A proxy route opts in with `"websocket": true`; the
+  handshake is validated (RFC 6455: `Sec-WebSocket-Version: 13` plus a 16-byte
+  `Sec-WebSocket-Key`), relayed verbatim, and then both directions are spliced
+  byte-for-byte until one side is done or the tunnel is idle for `WS_IDLE_TIMEOUT`.
+  Upgrades are refused (400) on every route that did not opt in, so the router can never
+  be used as an open TCP relay.  Anything a client sends before the 101 is discarded -
+  RFC 6455 §4.1 requires the client to wait for the handshake response.
 """
 from __future__ import annotations
 
+import base64
+import binascii
 import http.client
 import http.server
 import json
 import mimetypes
 import os
+import select
 import signal
 import socket
 import socketserver
@@ -41,9 +59,96 @@ HOP_BY_HOP = {
 }
 STARTED = time.time()
 
+# How long the router waits on an upstream (connect, head, one body read).
+UPSTREAM_TIMEOUT = 120.0
+# A websocket tunnel with no traffic in either direction for this long is closed.
+WS_IDLE_TIMEOUT = 900.0
+# A non-101 answer to an upgrade: relay it, then keep draining this long at most.
+UPGRADE_REFUSED_DRAIN = 30.0
+STREAM_CHUNK = 65536
+HEAD_LIMIT = 65536
+WS_KEY_BYTES = 16
+
+_tunnels = {"open": 0, "total": 0}
+_tunnels_lock = threading.Lock()
+
 
 def log(msg: str) -> None:
     print("%s %s" % (time.strftime("%Y-%m-%dT%H:%M:%S%z"), msg), flush=True)
+
+
+def token_in(value: str, token: str) -> bool:
+    """True when the comma-separated header `value` carries `token` (case-insensitive)."""
+    return token.lower() in (t.strip().lower() for t in (value or "").split(","))
+
+
+def ws_key_ok(key: str) -> bool:
+    """True for a valid `Sec-WebSocket-Key`: base64 of exactly 16 bytes."""
+    key = (key or "").strip()
+    if not key:
+        return False
+    try:
+        raw = base64.b64decode(key + "=" * (-len(key) % 4), validate=True)
+    except (binascii.Error, ValueError):
+        return False
+    return len(raw) == WS_KEY_BYTES
+
+
+def read_head(sock: socket.socket) -> bytes:
+    """Read an HTTP head (status line + headers, body bytes included if they came along)."""
+    data = bytearray()
+    while b"\r\n\r\n" not in data:
+        if len(data) > HEAD_LIMIT:
+            raise OSError("upstream head exceeded %d bytes" % HEAD_LIMIT)
+        piece = sock.recv(STREAM_CHUNK)
+        if not piece:
+            break
+        data.extend(piece)
+    return bytes(data)
+
+
+def splice(client: socket.socket, upstream: socket.socket, idle: float = WS_IDLE_TIMEOUT) -> tuple[int, int]:
+    """Relay bytes both ways until both directions end or nothing moves for `idle` seconds.
+
+    A half close is honoured: an EOF from one side shuts down only the other side's write
+    direction, so the remaining direction keeps flowing.  Returns (to_upstream, to_client).
+    """
+    for sock in (client, upstream):
+        sock.settimeout(None)
+    reading = [client, upstream]
+    moved = {client: 0, upstream: 0}
+    try:
+        while reading:
+            ready, _, _ = select.select(reading, [], [], idle)
+            if not ready:
+                log("ws-idle: no traffic for %.0fs, closing tunnel" % idle)
+                break
+            for src in ready:
+                dst = upstream if src is client else client
+                try:
+                    piece = src.recv(STREAM_CHUNK)
+                except OSError:
+                    piece = b""
+                if not piece:
+                    reading.remove(src)
+                    try:
+                        dst.shutdown(socket.SHUT_WR)
+                    except OSError:
+                        pass
+                    continue
+                try:
+                    dst.sendall(piece)
+                except OSError:
+                    reading.clear()
+                    break
+                moved[src] += len(piece)
+    finally:
+        for sock in (client, upstream):
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+    return moved[client], moved[upstream]
 
 
 def load_routes() -> dict:
@@ -82,7 +187,7 @@ def pick_route(routes: list, path: str):
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "ws-gateway/1.0"
+    server_version = "ws-gateway/1.1"
     routes: list = []
 
     # -- helpers ---------------------------------------------------------------
@@ -98,6 +203,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def _health(self) -> None:
+        with _tunnels_lock:
+            tunnels = dict(_tunnels)
         body = json.dumps({
             "status": "ok",
             "service": "ws-gateway",
@@ -106,6 +213,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "hostname": socket.gethostname(),
             "listen": self.server.listen_ports,
             "routes": [r.get("prefix") for r in self.routes],
+            "websockets": tunnels,
         }, indent=2).encode()
         self._send(200, body, "application/json")
 
@@ -127,53 +235,242 @@ class Handler(http.server.BaseHTTPRequestHandler):
         data = target.read_bytes()
         self._send(200, data, ctype, {"Cache-Control": "no-store"})
 
-    def _proxy(self, route: dict, path: str, query: str) -> None:
-        up = urllib.parse.urlsplit(route["upstream"])
+    # -- request side ----------------------------------------------------------
+    def _target_of(self, route: dict) -> str:
+        """The path (+query) to ask the upstream for, honouring `strip_prefix`."""
+        parsed = urllib.parse.urlsplit(self.path)
         prefix = route.get("prefix", "/")
-        rest = path[len(prefix):] if route.get("strip_prefix") else path
+        rest = parsed.path[len(prefix):] if route.get("strip_prefix") else parsed.path
         if not rest.startswith("/"):
             rest = "/" + rest
-        target = rest + (("?" + query) if query else "")
+        return rest + (("?" + parsed.query) if parsed.query else "")
 
+    def _forwarded_headers(self, route: dict, upstream_netloc: str) -> dict:
         headers = {}
         for k, v in self.headers.items():
-            if k.lower() in HOP_BY_HOP or k.lower() == "host":
+            low = k.lower()
+            if low in HOP_BY_HOP or low == "host":
                 continue
             headers[k] = v
-        headers["Host"] = up.netloc
+        headers["Host"] = upstream_netloc
         headers["X-Forwarded-Host"] = self.headers.get("Host", "")
-        headers["X-Forwarded-Prefix"] = prefix
+        headers["X-Forwarded-Prefix"] = route.get("prefix", "/")
         headers["X-Forwarded-Proto"] = self.headers.get("X-Forwarded-Proto", "http")
         prior = self.headers.get("X-Forwarded-For")
         headers["X-Forwarded-For"] = (prior + ", " if prior else "") + self.client_address[0]
+        return headers
 
-        body = None
-        length = self.headers.get("Content-Length")
-        if length:
-            body = self.rfile.read(int(length))
-            headers["Content-Length"] = str(len(body))
-
+    def _request_body(self, chunked: bool):
+        """An iterator over the client's body, or None.  Both framing kinds stream."""
+        if chunked:
+            return self._chunked_body()
+        raw = self.headers.get("Content-Length")
+        if not raw:
+            return None
         try:
-            conn = http.client.HTTPConnection(up.hostname, up.port or 80, timeout=120)
-            conn.request(self.command, target, body=body, headers=headers)
+            length = int(raw)
+        except ValueError:
+            return None
+        return self._sized_body(length)
+
+    def _sized_body(self, length: int):
+        left = length
+        while left > 0:
+            piece = self.rfile.read1(min(STREAM_CHUNK, left))
+            if not piece:
+                raise ConnectionError("client sent %d of %d body bytes" % (length - left, length))
+            left -= len(piece)
+            yield piece
+
+    def _chunked_body(self):
+        while True:
+            line = self.rfile.readline(HEAD_LIMIT)
+            if not line:
+                raise ConnectionError("client stopped inside a chunked body")
+            try:
+                size = int(line.split(b";", 1)[0].strip() or b"0", 16)
+            except ValueError:
+                raise ConnectionError("client sent a bad chunk size: %r" % line[:32])
+            if size == 0:
+                while True:                        # trailers (rare) up to the blank line
+                    trailer = self.rfile.readline(HEAD_LIMIT)
+                    if not trailer or trailer in (b"\r\n", b"\n"):
+                        return
+            left = size
+            while left:
+                piece = self.rfile.read1(min(STREAM_CHUNK, left))
+                if not piece:
+                    raise ConnectionError("client stopped inside a chunk")
+                left -= len(piece)
+                yield piece
+            self.rfile.read(2)                     # CRLF that closes the chunk
+
+    # -- proxying --------------------------------------------------------------
+    def _proxy(self, route: dict) -> None:
+        up = urllib.parse.urlsplit(route["upstream"])
+        target = self._target_of(route)
+        headers = self._forwarded_headers(route, up.netloc)
+        chunked = "chunked" in (self.headers.get("Transfer-Encoding") or "").lower()
+
+        conn = None
+        try:
+            body = self._request_body(chunked)
+            conn = http.client.HTTPConnection(up.hostname, up.port or 80, timeout=UPSTREAM_TIMEOUT)
+            conn.putrequest(self.command, target, skip_host=True, skip_accept_encoding=True)
+            for k, v in headers.items():
+                conn.putheader(k, v)
+            if chunked:
+                conn.putheader("Transfer-Encoding", "chunked")
+            conn.endheaders()
+            if body is not None:
+                for piece in body:
+                    conn.send(b"%x\r\n%s\r\n" % (len(piece), piece) if chunked else piece)
+                if chunked:
+                    conn.send(b"0\r\n\r\n")
             resp = conn.getresponse()
-        except Exception as exc:  # upstream down / DNS / timeout
+        except Exception as exc:  # upstream down / bad request / client vanished mid-body
+            if conn is not None:
+                conn.close()
             log("proxy-error %s -> %s : %s" % (target, route["upstream"], exc))
-            self._send(502, b"502 - upstream %s unreachable: %s\n" % (route["upstream"].encode(), str(exc).encode()))
+            self._send(502, b"502 - upstream %s unreachable: %s\n"
+                       % (route["upstream"].encode(), str(exc).encode()))
             return
 
-        payload = resp.read()
-        self.send_response(resp.status, resp.reason)
-        for k, v in resp.getheaders():
-            if k.lower() in HOP_BY_HOP or k.lower() == "content-length":
-                continue
-            self.send_header(k, v)
-        self.send_header("Content-Length", str(len(payload)))
-        self.end_headers()
-        if self.command != "HEAD":
-            self.wfile.write(payload)
-        conn.close()
+        try:
+            self._relay(resp)
+        finally:
+            conn.close()
         self._log_status = resp.status
+
+    def _relay(self, resp: http.client.HTTPResponse) -> None:
+        """Stream one upstream response back, keeping its framing semantics."""
+        passthrough, upstream_length = [], None
+        for k, v in resp.getheaders():
+            low = k.lower()
+            if low == "content-length":
+                upstream_length = v          # described by whatever framing we choose
+                continue
+            if low in HOP_BY_HOP:
+                continue
+            passthrough.append((k, v))
+
+        has_body = self.command != "HEAD" and resp.status >= 200 and resp.status not in (204, 304)
+        if not has_body:
+            framing = "none"
+        elif resp.chunked:
+            framing = "chunked"
+        elif resp.length is not None:
+            framing = "length"
+        else:
+            framing = "close"
+
+        self.send_response(resp.status, resp.reason)
+        for k, v in passthrough:
+            self.send_header(k, v)
+        if framing == "chunked":
+            self.send_header("Transfer-Encoding", "chunked")
+        elif framing == "length":
+            self.send_header("Content-Length", str(resp.length))
+        elif framing == "close":
+            self.close_connection = True
+            self.send_header("Connection", "close")
+        elif upstream_length is not None:
+            self.send_header("Content-Length", upstream_length)   # a HEAD describes its body
+        self.end_headers()
+
+        if framing == "none":
+            return
+        limit = resp.length if framing == "length" else None
+        sent = 0
+        while True:
+            piece = resp.read1(STREAM_CHUNK)
+            if not piece:
+                break
+            if framing == "chunked":
+                self.wfile.write(b"%x\r\n%s\r\n" % (len(piece), piece))
+            else:
+                self.wfile.write(piece)
+            self.wfile.flush()               # one upstream read = one bite at the client
+            sent += len(piece)
+            if limit is not None and sent >= limit:
+                break
+        if limit is not None and sent < limit:
+            self.close_connection = True
+            log("proxy-short-body upstream=%s sent=%d of %d" % (resp.status, sent, limit))
+        if framing == "chunked":
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+
+    # -- websocket upgrades ----------------------------------------------------
+    def _upgrade_requested(self) -> bool:
+        return (token_in(self.headers.get("Connection", ""), "upgrade")
+                and (self.headers.get("Upgrade") or "").strip().lower() == "websocket")
+
+    def _websocket(self, route: dict) -> None:
+        """Relay the handshake, then splice the connection both ways."""
+        key = self.headers.get("Sec-WebSocket-Key") or ""
+        version = (self.headers.get("Sec-WebSocket-Version") or "").strip()
+        if version != "13" or not ws_key_ok(key):
+            log("ws-refused prefix=%s client=%s version=%r key=%s"
+                % (route.get("prefix"), self.client_address[0], version, "bad" if key else "missing"))
+            self._send(400, b"400 - not a websocket handshake: RFC 6455 needs "
+                            b"Sec-WebSocket-Version: 13 and a 16-byte Sec-WebSocket-Key\n")
+            return
+
+        up = urllib.parse.urlsplit(route["upstream"])
+        target = self._target_of(route)
+        head = ["GET %s HTTP/1.1" % target, "Host: %s" % up.netloc]
+        for k, v in self.headers.items():
+            low = k.lower()
+            if low in ("host", "connection", "upgrade", "x-forwarded-for", "x-forwarded-host",
+                       "x-forwarded-prefix", "x-forwarded-proto"):
+                continue
+            head.append("%s: %s" % (k, v))
+        head += ["Connection: Upgrade", "Upgrade: websocket",
+                 "X-Forwarded-Prefix: %s" % route.get("prefix", "/"),
+                 "X-Forwarded-Proto: %s" % self.headers.get("X-Forwarded-Proto", "http"),
+                 "X-Forwarded-For: %s" % self.client_address[0]]
+        request_head = ("\r\n".join(head) + "\r\n\r\n").encode("latin-1")
+
+        try:
+            upstream = socket.create_connection((up.hostname, up.port or 80), timeout=UPSTREAM_TIMEOUT)
+        except OSError as exc:
+            log("ws-error %s -> %s : %s" % (target, route["upstream"], exc))
+            self._send(502, b"502 - upstream %s unreachable: %s\n"
+                       % (route["upstream"].encode(), str(exc).encode()))
+            return
+        try:
+            upstream.sendall(request_head)
+            upstream.settimeout(UPSTREAM_TIMEOUT)
+            response_head = read_head(upstream)
+            try:
+                status_code = int(response_head.split(b" ", 2)[1])
+            except (IndexError, ValueError):
+                status_code = 0
+            if status_code != 101:
+                log("ws-refused-by-upstream prefix=%s target=%s status=%r"
+                    % (route.get("prefix"), target, response_head.split(b"\r\n", 1)[0][:80]))
+                self.connection.sendall(response_head)
+                self.close_connection = True
+                splice(self.connection, upstream, UPGRADE_REFUSED_DRAIN)
+                return
+
+            self.connection.sendall(response_head)
+            self.close_connection = True            # never reuse this connection for HTTP
+            with _tunnels_lock:
+                _tunnels["open"] += 1
+                _tunnels["total"] += 1
+            began = time.time()
+            log("ws-open prefix=%s target=%s client=%s" % (route.get("prefix"), target, self.client_address[0]))
+            to_up, to_client = splice(self.connection, upstream)
+            with _tunnels_lock:
+                _tunnels["open"] -= 1
+            log("ws-close prefix=%s client=%s seconds=%.1f to_upstream=%d to_client=%d"
+                % (route.get("prefix"), self.client_address[0], time.time() - began, to_up, to_client))
+        except OSError as exc:
+            log("ws-error prefix=%s : %s" % (route.get("prefix"), exc))
+        finally:
+            upstream.close()
 
     # -- dispatch --------------------------------------------------------------
     def _handle(self) -> None:
@@ -186,10 +483,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if route is None:
             self._send(404, b"404 - ws-gateway has no route for %s\n" % path.encode())
             return
+        if self._upgrade_requested():
+            if route["type"] == "proxy" and route.get("websocket"):
+                self._websocket(route)
+            else:                                   # never a general-purpose TCP relay
+                log("ws-refused prefix=%s client=%s (route did not opt in)"
+                    % (route.get("prefix"), self.client_address[0]))
+                self._send(400, b"400 - websocket upgrades are not enabled for %s\n" % path.encode())
+            return
         if route["type"] == "static":
             self._static(route, path)
         else:
-            self._proxy(route, path, parsed.query)
+            self._proxy(route)
 
     do_GET = do_HEAD = do_POST = do_PUT = do_DELETE = do_PATCH = do_OPTIONS = _handle
 
@@ -241,7 +546,7 @@ def main() -> int:
     PID_FILE.parent.mkdir(parents=True, exist_ok=True)
     PID_FILE.write_text(str(os.getpid()))
     log("ws-gateway up: pid=%d ports=%s routes=%s" % (
-        os.getpid(), bound, [r.get("prefix") for r in Handler.routes]))
+        os.getpid(), bound, [(r.get("prefix"), "ws" if r.get("websocket") else "http") for r in Handler.routes]))
 
     stop = threading.Event()
     for sig in (signal.SIGTERM, signal.SIGINT):

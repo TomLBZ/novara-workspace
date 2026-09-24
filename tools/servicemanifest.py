@@ -32,7 +32,8 @@ import sys
 
 SCHEMA_NOTE = (
     "services.json owns: services (script/port|listen/health/log), the gateway's routes, "
-    "and per-service settings. config.yaml owns credentials/identity/LLM. "
+    "and per-service settings. A proxy route may set \"websocket\": true to carry websocket "
+    "upgrades on that prefix. config.yaml owns credentials/identity/LLM. "
     "Top-level keys starting with '_' are comments and are ignored."
 )
 ROUTE_TYPES = ("static", "proxy")
@@ -166,6 +167,10 @@ def problems(manifest: dict) -> list[str]:
                 elif not target and not (isinstance(upstream, str) and upstream.startswith("http")):
                     found.append("%s: a proxy route needs 'service' (a service name) "
                                  "or 'upstream' (http://host:port)" % where)
+            if "websocket" in route and not isinstance(route["websocket"], bool):
+                found.append("%s: 'websocket' must be true or false" % where)
+            elif route.get("websocket") and kind != "proxy":
+                found.append("%s: 'websocket' only applies to a proxy route" % where)
     return found
 
 

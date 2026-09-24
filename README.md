@@ -344,8 +344,10 @@ The live table (2026-09-11) — the dashboard owns `/`, projects live under a pr
 
 `/healthz` is reserved by the router, and both listen ports carry the same table, so NPM can forward
 to either one. Route matching is longest-prefix; `strip_prefix` decides whether the prefix is
-removed before forwarding. The table lives in the manifest (`services.json` → `gateway.routes`), so
-after editing it run `ws-gateway validate && ws-gateway restart gateway` (it is read at start-up).
+removed before forwarding. A proxy route adds `"websocket": true` to carry WebSocket upgrades on its
+prefix; without it an upgrade request on that prefix is refused with `400`. The table lives in the
+manifest (`services.json` → `gateway.routes`), so after editing it run
+`ws-gateway validate && ws-gateway restart gateway` (it is read at start-up).
 
 **Services.** The machine-local `services/services.json` (bootstrapped from the tracked example) is
 the manifest of everything that must stay up; each entry declares `script`, a port (`port`, or
@@ -384,8 +386,17 @@ within ~60 s and staying silent while it is healthy. Its glue script
 (`$HERMES_HOME/scripts/ws-gateway-ensure.sh`) is deployment wiring, deliberately outside the
 workspace.
 
-Known limits: plain HTTP only (no WebSocket upgrade yet) and each proxied response is buffered
-before it is returned.
+**Transport.** Responses stream: a proxied body is copied to the client as it arrives, keeping the
+upstream's framing (`Content-Length` relayed as-is, a chunked upstream re-framed as chunked, an
+upstream that says nothing about length becomes `Connection: close`), and request bodies stream too —
+`Content-Length` and `Transfer-Encoding: chunked` alike. WebSocket upgrades tunnel on the routes that
+opt in with `"websocket": true`: the RFC 6455 handshake is validated (`Sec-WebSocket-Version: 13` plus
+a 16-byte `Sec-WebSocket-Key`), relayed to the upstream verbatim, and both directions are then spliced
+byte-for-byte — no re-framing, so control frames and 64-bit lengths survive. A tunnel idle for 15
+minutes is closed, and every open, close (with byte counts) and refusal is logged. On a prefix that did
+not opt in, an upgrade is `400`, so the router is never a general-purpose TCP relay. `tools/verify.sh`
+runs the two suites that pin this down: `services/gateway/tests/test_http.py` (framing, streaming,
+request bodies) and `services/gateway/tests/test_websocket.py` (handshake, splice, refusals).
 
 ## Portability / relocation
 
