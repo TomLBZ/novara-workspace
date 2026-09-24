@@ -221,6 +221,11 @@ class Upstream:
             size = int(handler.path.split("n=")[-1]) if "n=" in handler.path else BIG
             body = (b"0123456789abcdef" * ((size // 16) + 1))[:size]
             return self.reply(handler, 200, body, "application/octet-stream")
+        if path == "/cached":
+            # An upstream that already has a Cache-Control of its own (the router must merge,
+            # not replace, when a route asks for no-transform).
+            return self.reply(handler, 200, b"from cache-control upstream\n",
+                              extra={"Cache-Control": "no-store"})
         if path == "/refuse-upgrade":
             return self.reply(handler, 403, b"upstream says no\n")
         if path == "/no-length":                      # HTTP/1.0 style: body ends at EOF

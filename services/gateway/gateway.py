@@ -26,6 +26,12 @@ Transport notes, because they decide what a service behind this router can do:
   Upgrades are refused (400) on every route that did not opt in, so the router can never
   be used as an open TCP relay.  Anything a client sends before the 101 is discarded -
   RFC 6455 §4.1 requires the client to wait for the handshake response.
+* **A route can forbid rewriting.**  `"no_transform": true` makes the router guarantee
+  `Cache-Control: no-transform` on that route's responses, so an intermediate CDN (Cloudflare's
+  Rocket Loader) passes the HTML through untouched.  Apps that ship a nonce CSP need it: the
+  injected loader's inline activation script carries no nonce, so `script-src … 'nonce-…'`
+  blocks it and the page executes nothing (`/vscode` = code-server behaves exactly like this).
+  Apps whose HTML we own opt out per script with `data-cfasync="false"` instead.
 """
 from __future__ import annotations
 
@@ -185,6 +191,30 @@ def pick_route(routes: list, path: str):
     return best
 
 
+def with_no_transform(headers: list) -> list:
+    """Ensure the outgoing `Cache-Control` says `no-transform` (a route with that flag).
+
+    Why it exists: an intermediate CDN may rewrite an HTML response on the way out.  Cloudflare's
+    Rocket Loader does - it rewrites every `<script>` type and injects its own loader - and that
+    breaks any app that ships a **nonce CSP**: the injected loader's inline activation script has no
+    nonce, so `script-src 'self' … 'nonce-…'` blocks it and the page executes nothing (code-server's
+    workbench renders a blank page exactly this way).  `no-transform` is the origin-side instruction
+    that tells such a middlebox to pass the response through untouched, so the app's own CSP stays
+    intact; apps whose HTML we can edit opt out per script with `data-cfasync="false"` instead
+    (`services/sites/hello`, the dashboard).
+    """
+    out, found = [], False
+    for k, v in headers:
+        if k.lower() == "cache-control":
+            found = True
+            if "no-transform" not in v.lower():
+                v = ("%s, no-transform" % v) if v.strip() else "no-transform"
+        out.append((k, v))
+    if not found:
+        out.append(("Cache-Control", "no-transform"))
+    return out
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "ws-gateway/1.1"
@@ -337,12 +367,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return
 
         try:
-            self._relay(resp)
+            self._relay(resp, route)
         finally:
             conn.close()
         self._log_status = resp.status
 
-    def _relay(self, resp: http.client.HTTPResponse) -> None:
+    def _relay(self, resp: http.client.HTTPResponse, route: dict | None = None) -> None:
         """Stream one upstream response back, keeping its framing semantics."""
         passthrough, upstream_length = [], None
         for k, v in resp.getheaders():
@@ -353,6 +383,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if low in HOP_BY_HOP:
                 continue
             passthrough.append((k, v))
+        if route and route.get("no_transform"):
+            passthrough = with_no_transform(passthrough)
 
         has_body = self.command != "HEAD" and resp.status >= 200 and resp.status not in (204, 304)
         if not has_body:

@@ -33,8 +33,10 @@ import sys
 SCHEMA_NOTE = (
     "services.json owns: services (script/port|listen/health/log), the gateway's routes, "
     "and per-service settings. A proxy route may set \"websocket\": true to carry websocket "
-    "upgrades on that prefix, and \"entry\": \"/prefix/\" to declare the front door of an app "
-    "that cannot declare it itself. config.yaml owns credentials/identity/LLM. "
+    "upgrades on that prefix, \"entry\": \"/prefix/\" to declare the front door of an app "
+    "that cannot declare it itself, and \"no_transform\": true to make its responses carry "
+    "`Cache-Control: no-transform` (an intermediate CDN must not rewrite them). "
+    "config.yaml owns credentials/identity/LLM. "
     "Top-level keys starting with '_' are comments and are ignored."
 )
 ROUTE_TYPES = ("static", "proxy")
@@ -172,6 +174,8 @@ def problems(manifest: dict) -> list[str]:
                 found.append("%s: 'websocket' must be true or false" % where)
             elif route.get("websocket") and kind != "proxy":
                 found.append("%s: 'websocket' only applies to a proxy route" % where)
+            if "no_transform" in route and not isinstance(route["no_transform"], bool):
+                found.append("%s: 'no_transform' must be true or false" % where)
             if "entry" in route:
                 entry_path = route.get("entry")
                 if (not isinstance(entry_path, str) or not entry_path.endswith("/")

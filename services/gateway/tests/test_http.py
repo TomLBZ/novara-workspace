@@ -63,6 +63,9 @@ def main() -> int:
              "strip_prefix": True, "websocket": True},
             {"prefix": "/plain", "type": "proxy", "upstream": "http://127.0.0.1:%d" % up.port},
             {"prefix": "/dead", "type": "proxy", "upstream": "http://127.0.0.1:%d" % dead_port},
+            # A route whose responses an intermediate CDN must pass through untouched.
+            {"prefix": "/nt", "type": "proxy", "upstream": "http://127.0.0.1:%d" % up.port,
+             "strip_prefix": True, "no_transform": True},
         ]
         with fixture.Gateway(tmp, routes) as gw:
             # --- routing + headers -------------------------------------------
@@ -79,6 +82,20 @@ def main() -> int:
             check("a route without strip_prefix keeps the prefix",
                   get(gw.port, "/plain/text")[0] == 404 and up.paths[-1] == "/plain/text",
                   repr(up.paths[-1]))
+
+            # --- no_transform (an intermediate CDN must not rewrite these responses) ---
+            status, headers, _ = get(gw.port, "/nt/text")
+            check("a no_transform route sends Cache-Control: no-transform even when the upstream sent none",
+                  status == 200 and headers.get("Cache-Control") == "no-transform",
+                  repr(headers.get("Cache-Control")))
+            status, headers, _ = get(gw.port, "/nt/cached")
+            check("an upstream Cache-Control is merged, not replaced",
+                  status == 200 and headers.get("Cache-Control") == "no-store, no-transform",
+                  repr(headers.get("Cache-Control")))
+            status, headers, _ = get(gw.port, "/up/text")
+            check("a route without the flag is left alone",
+                  status == 200 and headers.get("Cache-Control") is None,
+                  repr(headers.get("Cache-Control")))
 
             status, _, body = get(gw.port, "/nope/at/all")
             check("unknown prefix is a router 404", status == 404 and b"no route" in body,

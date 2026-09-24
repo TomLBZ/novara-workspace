@@ -27,6 +27,7 @@
         "service": "vscode",
         "websocket": true,
         "entry": "/vscode/",
+        "no_transform": true,
         "note": "VS Code (code-server): the workbench keeps a websocket open to the extension host",
         "strip_prefix": true
       },

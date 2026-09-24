@@ -19,6 +19,11 @@ upstream request (route without `strip_prefix`) is enough.  Two things are load-
 * `--auth password` with the password from `config.yaml` -> `vscode.password`, else a
   generated 0600 file (`config/vscode-password`).  Never `--auth none`: the prefix is
   publicly reachable through Nginx Proxy Manager.
+* the workbench ships a **nonce CSP** (`script-src 'self' 'unsafe-eval' blob: 'nonce-…'`), so the
+  `/vscode` route sets `"no_transform": true`: the router then sends `Cache-Control: no-transform`,
+  which stops Cloudflare's Rocket Loader from rewriting the page.  Without it Rocket Loader injects
+  a loader whose inline activation script has no nonce, the CSP blocks it, no script runs and the
+  workbench is a blank page.
 
 Every state file (user data, extensions, HOME) stays inside `runtime/code-server/`, so the
 whole service travels with the workspace bind mount.

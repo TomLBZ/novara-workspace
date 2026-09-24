@@ -350,7 +350,9 @@ to either one. Route matching is longest-prefix; `strip_prefix` decides whether 
 removed before forwarding. A proxy route adds `"websocket": true` to carry WebSocket upgrades on its
 prefix; without it an upgrade request on that prefix is refused with `400`. It may also declare
 `"entry": "/prefix/"` — the clickable front door the dashboard shows for that route, for an app that
-cannot declare one itself (code-server, a vendored third-party binary, has no route table to ask).
+cannot declare one itself (code-server, a vendored third-party binary, has no route table to ask) —
+and `"no_transform": true`, which makes the router send `Cache-Control: no-transform` so an
+intermediate CDN cannot rewrite that app's responses (see the Rocket Loader note below).
 The table lives in the manifest (`services.json` → `gateway.routes`), so after editing it run
 `ws-gateway validate && ws-gateway restart gateway` (it is read at start-up).
 
@@ -550,9 +552,14 @@ or `api_keys.*` are empty placeholders the corresponding check is skipped instea
   real browser: services up, watcher states, container stats, 60 ms browser round trip),
   `/api/status` → `200` JSON, `/projects/hello/` → `200` (hello page, still wired to `/healthz`),
   `/assets/*` → `200`, unknown path → `404`
-- **Cloudflare Rocket Loader rewrites `<script>` tags** on this zone (it rewrote
-  `/assets/app.js` and deferred the inline script). Both pages carry `data-cfasync="false"` to opt
-  out; turning Rocket Loader off for the zone is the cleaner fix
+- **Cloudflare Rocket Loader rewrites `<script>` tags** on this zone (it rewrote `/assets/app.js`
+  and deferred the inline script). Pages whose HTML we own opt out per script with
+  `data-cfasync="false"`; a route whose app we cannot edit asks the CDN to leave the response alone
+  with `"no_transform": true` → `Cache-Control: no-transform`. `/vscode` needs the latter:
+  code-server ships a nonce CSP and Rocket Loader's injected loader has no nonce, so
+  `script-src 'self' … 'nonce-…'` blocked it and the workbench stayed blank (fixed 2026-09-24,
+  verified by rendering the workbench through the public entry). Turning Rocket Loader off for the
+  zone is still the other option; `no-transform` holds either way.
 - **public leg live (2026-09-11 21:32Z)**: `https://novara.remoteblossom.com/healthz` → `200` with
   this workspace's JSON in 0.40 s, `/` → `200` (hello page), `http://` → `301 https`, and the
   ZeroTier-side name `novara.local.remoteblossom.com` still returns `200` in parallel — the two
