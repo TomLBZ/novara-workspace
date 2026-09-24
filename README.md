@@ -143,9 +143,10 @@ after any plugin change, then restart the gateway to load it.
 | npm / npx | 11.19.0 | cache + global prefix inside the workspace |
 | git | 2.55.0 | bundled with libcurl/openssl/CA bundle → `https://` clones work with no system deps |
 | micromamba | 2.9.0 | static; for any extra conda-forge package |
+| code-server | 4.138.0 (Code 1.138.0) | VS Code in the browser; vendored under `runtime/code-server/`, serves `/vscode` |
 
-Approximate footprint: `runtime/` ≈ 665 MB, `venvs/` ≈ 21 MB, whole workspace ≈ 685 MB
-(the ~112 MB under `runtime/cache/` is re-creatable download cache).
+Approximate footprint: `runtime/` ≈ 1.3 GB (`runtime/cache/` ≈ 330 MB is re-creatable download
+cache, `runtime/code-server/` ≈ 365 MB is VS Code itself), `venvs/` ≈ 21 MB.
 
 ## Environment set by `bin/activate.sh`
 
@@ -339,6 +340,7 @@ The live table (2026-09-11) — the dashboard owns `/`, projects live under a pr
 
 ```
 /projects/hello   static  services/sites/hello     hello-world project
+/vscode           proxy   http://127.0.0.1:8095    ws-vscode (VS Code in the browser, websockets)
 /                 proxy   http://127.0.0.1:8090    ws-dashboard (UI + /api/status + /api/files/*)
 ```
 
@@ -377,6 +379,35 @@ services/dashboard/dashboard.py --files-token --rotate   # new token, old one di
 Five wrong tokens from one client lock the unlock endpoint for 5 minutes. Knobs live in the manifest
 under `dashboard.settings.files` (`root`, `admin_root`, `token_file`, `max_entries`,
 `max_preview_bytes`, `max_raw_bytes`, `deny_extra`).
+
+**VS Code in the browser.** `ws-vscode` (`services/vscode/vscode.py`) supervises a vendored
+`runtime/code-server/current` and is reachable at **`/vscode`** — no client install, one link:
+
+```
+https://novara.local.remoteblossom.com/vscode/                                  # the workspace root
+https://novara.local.remoteblossom.com/vscode/?folder=/workspace/projects/quotagent
+https://novara.remoteblossom.com/vscode/                                        # same editor, public host
+```
+
+The password comes from `config.yaml` -> `vscode.password` when set; otherwise the service
+generates one into `config/vscode-password` (mode 0600, gitignored) on first start:
+
+```bash
+services/vscode/vscode.py --password            # print it (generates on first call)
+services/vscode/vscode.py --password --rotate   # new password; open sessions end at once
+services/vscode/vscode.py --check               # resolved entry, settings, binary, password source
+```
+
+Knobs live in the manifest under `vscode.settings`: `folder` (what opens by default, `"."` = the
+workspace), `trusted_origins` (**every** hostname you open `/vscode` from), `password_file`,
+`runtime_dir`, `code_server`, `disable_workspace_trust`. `trusted_origins` is load-bearing:
+code-server refuses an upgrade whose `Origin` does not match the `Host` it is reached under, and
+behind a proxy it always is — a missing hostname looks exactly like "the page loads but the
+workbench never connects" (`ws-refused-by-upstream ... 403 Forbidden` in `logs/gateway.log`).
+User data, extensions and the editor's `HOME` stay inside `runtime/code-server/`, so the editor
+travels with the bind mount and comes back after a container rebuild. Health is code-server's own
+`/healthz`; the `/vscode` route carries `"websocket": true` because the workbench keeps a
+websocket open to its extension host.
 
 **Surviving a new image.** Every service lives on the bind-mounted workspace (`services/`,
 `bin/ws-gateway`) and runs on the workspace's own venv python, so a container rebuilt from a
