@@ -342,13 +342,16 @@ The live table (2026-09-11) — the dashboard owns `/`, projects live under a pr
 /projects/hello   static  services/sites/hello     hello-world project
 /vscode           proxy   http://127.0.0.1:8095    ws-vscode (VS Code in the browser, websockets)
 /                 proxy   http://127.0.0.1:8090    ws-dashboard (UI + /api/status + /api/files/*)
+/quotagent        proxy   http://127.0.0.1:8093    the quotagent project's own webui
 ```
 
 `/healthz` is reserved by the router, and both listen ports carry the same table, so NPM can forward
 to either one. Route matching is longest-prefix; `strip_prefix` decides whether the prefix is
 removed before forwarding. A proxy route adds `"websocket": true` to carry WebSocket upgrades on its
-prefix; without it an upgrade request on that prefix is refused with `400`. The table lives in the
-manifest (`services.json` → `gateway.routes`), so after editing it run
+prefix; without it an upgrade request on that prefix is refused with `400`. It may also declare
+`"entry": "/prefix/"` — the clickable front door the dashboard shows for that route, for an app that
+cannot declare one itself (code-server, a vendored third-party binary, has no route table to ask).
+The table lives in the manifest (`services.json` → `gateway.routes`), so after editing it run
 `ws-gateway validate && ws-gateway restart gateway` (it is read at start-up).
 
 **Services.** The machine-local `services/services.json` (bootstrapped from the tracked example) is

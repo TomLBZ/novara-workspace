@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""End-to-end HTTP checks for the dashboard file-browser API (stdlib only).
+"""End-to-end HTTP checks for the dashboard API (stdlib only).
 
 Starts `dashboard.py` on a free loopback port with a scratch config (its own token
-file under `tmp/`, so the live one is untouched), exercises the API against the real
-workspace tree read-only, then stops the server.
+file under `tmp/`, so the live one is untouched) and a scratch manifest, exercises
+the file-browser API against the real workspace tree read-only, the route-entry
+declaration (static / declared-entry / undeclared) and the watcher schedule
+normalisation, then stops the server.
 
   python3 services/dashboard/tests/test_http.py [--ws-root PATH]
 """
@@ -73,13 +75,46 @@ def main() -> int:
     settings["files"] = {**(settings.get("files") or {}),
                          "token_file": str(token_file.relative_to(ws_root))}
     manifest_path = work / "services.json"
+    dead = free_port()
     manifest_path.write_text(json.dumps({
         "_about": "scratch manifest for tests/test_http.py",
         "dashboard": {**base, "port": port, "settings": settings},
+        # A service that nothing is listening for: the route can be asked about nothing at all.
+        "ghost": {"script": "services/ghost/ghost.py", "port": dead, "health": "/healthz",
+                  "log": "logs/ghost.log"},
+        # Route table fixtures: a static route (no service to ask), a proxy route whose app cannot
+        # answer a route table but that declares its own `entry`, and one that declares nothing.
+        "gateway": {
+            "script": "services/gateway/gateway.py", "port": free_port(), "health": "/healthz",
+            "log": "logs/gateway.log",
+            "routes": [
+                {"prefix": "/projects/hello", "type": "static", "root": "services/sites/hello"},
+                {"prefix": "/front-door", "type": "proxy", "service": "ghost", "entry": "/front-door/"},
+                {"prefix": "/no-entry", "type": "proxy", "service": "ghost"},
+            ],
+        },
     }))
 
+    # Watcher fixtures: the two schedule shapes the API has to present in one vocabulary.
+    home = work / "hermes-home"
+    (home / "cron").mkdir(parents=True, exist_ok=True)
+    (home / "cron" / "jobs.json").write_text(json.dumps({"jobs": [
+        {"id": "j1", "name": "minutely", "schedule": {"kind": "cron", "expr": "* * * * *",
+                                                     "display": "* * * * *"},
+         "schedule_display": "* * * * *", "last_run_at": "2026-09-24T10:10:19.473769+00:00",
+         "last_status": "ok", "enabled": True},
+        {"id": "j2", "name": "five-minutely", "schedule": {"kind": "cron", "expr": "*/5 * * * *",
+                                                          "display": "*/5 * * * *"},
+         "schedule_display": "*/5 * * * *", "last_run_at": "2026-09-24T10:05:19.852731+00:00",
+         "last_status": "ok", "enabled": True},
+        {"id": "j3", "name": "quarter-hourly", "schedule": {"kind": "interval", "minutes": 15,
+                                                           "display": "every 15m"},
+         "schedule_display": "every 15m", "last_run_at": "2026-09-24T09:57:18.100000+00:00",
+         "last_status": "ok", "enabled": True},
+    ]}))
+
     env = {"PATH": "/usr/bin:/bin", "WS_MANIFEST": str(manifest_path), "WS_SERVICE": "dashboard",
-           "WS_PID_FILE": str(work / "dashboard.pid"), "HERMES_HOME": "/opt/data"}
+           "WS_PID_FILE": str(work / "dashboard.pid"), "HERMES_HOME": str(home)}
     server_log = work / "server.log"
     log_handle = open(server_log, "w")
     proc = subprocess.Popen([sys.executable, str(HERE / "dashboard.py")], env=env,
@@ -174,6 +209,37 @@ def main() -> int:
         status, body = client.request("/api/status")
         check("the existing status API still answers", status == 200 and "services" in body,
               f"{status} {str(body)[:200]}")
+
+        routes = {r["prefix"]: r for r in body.get("routes", [])}
+        check("a static route links to its own prefix",
+              routes.get("/projects/hello", {}).get("link") == "/projects/hello/"
+              and routes["/projects/hello"]["entry_source"] == "manifest:gateway.routes.prefix",
+              str(routes.get("/projects/hello")))
+        check("a route that declares its own entry lights up like the others",
+              routes.get("/front-door", {}).get("link") == "/front-door/"
+              and routes["/front-door"]["entry_source"] == "manifest:gateway.routes.entry",
+              str(routes.get("/front-door")))
+        check("a route that declares nothing stays plain text and says why",
+              routes.get("/no-entry", {}).get("link") is None
+              and routes["/no-entry"]["entry_source"] == "routes-unreachable",
+              str(routes.get("/no-entry")))
+
+        watchers = {w["name"]: w for w in body.get("watchers", [])}
+        check("every watcher's schedule has the same shape",
+              len(watchers) == 3
+              and all(set(w["schedule"]) == {"kind", "every_seconds", "raw", "display"}
+                      for w in watchers.values()), str(body.get("watchers"))[:200])
+        check("a cron job and an interval job are worded the same way",
+              [watchers[n]["schedule"]["display"] for n in ("minutely", "five-minutely", "quarter-hourly")]
+              == ["every 1 min", "every 5 min", "every 15 min"], str(body.get("watchers"))[:300])
+        check("the period and the source expression both survive",
+              [watchers[n]["schedule"]["every_seconds"] for n in ("minutely", "five-minutely", "quarter-hourly")]
+              == [60, 300, 900]
+              and watchers["five-minutely"]["schedule"]["raw"] == "*/5 * * * *"
+              and watchers["quarter-hourly"]["schedule"]["kind"] == "interval",
+              str(body.get("watchers"))[:300])
+        check("last run times are normalised to HH:MM:SSZ",
+              watchers["minutely"]["last_run_at"] == "10:10:19Z", str(watchers.get("minutely")))
         status, body = Client(base).request("/api/files/access")   # anonymous client
         check("manifest settings reach the file browser (root=projects)",
               status == 200 and body.get("browse_root") == "projects", str(body))

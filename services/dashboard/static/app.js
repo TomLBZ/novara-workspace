@@ -23,6 +23,34 @@ function rows(tableId, data, cells) {
     || "<tr><td colspan='4' class='dim'>none</td></tr>";
 }
 
+/* ---------------------------------------------------------------------------
+ * Components — one place that turns a structured API value into markup.
+ * Rule: a cell that shows the same kind of information as another cell goes
+ * through the same component, so one fact can never be shown in two
+ * vocabularies (the watchers' schedule column used to print the raw cron
+ * expression next to the interval job's own `every 15m`).
+ * ------------------------------------------------------------------------- */
+const ui = {
+  /** Small pill for a single attribute value. */
+  chip(text, opts = {}) {
+    const cls = ["chip"].concat(opts.tone ? ["chip-" + opts.tone] : []).join(" ");
+    const title = opts.title ? " title='" + esc(opts.title) + "'" : "";
+    return "<span class='" + cls + "'" + title + ">" + esc(text) + "</span>";
+  },
+  /** A watcher's period: one wording for cron jobs and interval jobs alike. */
+  schedule(s) {
+    if (!s || !s.display) return "<span class='dim'>—</span>";
+    const title = [s.kind, s.raw].filter(Boolean).join(" ");
+    return ui.chip(s.display, { tone: s.every_seconds ? "" : "dim", title });
+  },
+  /** A watcher's last outcome. */
+  status(value) {
+    const v = String(value || "").toLowerCase();
+    const tone = ["ok", "success", "up"].includes(v) ? "ok" : (v === "pending" ? "dim" : "bad");
+    return ui.chip(value || "—", { tone });
+  },
+};
+
 async function load() {
   try {
     const r = await fetch("/api/status", { cache: "no-store" });
@@ -57,7 +85,7 @@ async function load() {
       r.type, r.target
     ]);
     rows("watchers", d.watchers, (w) => [
-      w.name, w.schedule, (w.last_run_at || "—") + "", w.last_status || "—"
+      w.name, ui.schedule(w.schedule), (w.last_run_at || "—") + "", ui.status(w.last_status)
     ]);
 
     const s = d.system;

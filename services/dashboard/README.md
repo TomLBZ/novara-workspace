@@ -31,20 +31,41 @@ Two different things, deliberately kept apart — and both are **minimal by rule
   `/api/*` list** here: an app's sub-pages are the app's own responsibility — *a site's entry point
   must never treat every sub-page as an entry point*.
 
-**The one entry declaration.** A route's clickable entry path comes from exactly one source:
+**The one entry declaration.** A route's clickable entry path comes from exactly one source, in this
+order:
 
 1. the app behind the route declares it itself — the **first** route in its
    `GET <prefix>/api/routes` whose `path` ends in `/` and equals the prefix itself
    (`/quotagent` → `/quotagent/`, from `quotagent-webui`'s own route table). Only that one route is
    read; the rest of that table (sub-pages, `/api/*`) is never pulled into this layer;
-2. a route with **no service behind it** (e.g. the `static` route `/projects/hello`) has nothing to
+2. the route declares it itself — `gateway.routes[].entry` (`/vscode` → `/vscode/`). This is for an
+   app that cannot answer a route table at all: `/vscode` is code-server, a vendored third-party
+   binary behind a supervisor (`services/vscode/vscode.py`), so its front door is a fact the *route*
+   knows rather than something this layer could infer;
+3. a route with **no service behind it** (e.g. the `static` route `/projects/hello`) has nothing to
    ask, so the router's own `gateway.routes.prefix` is the only declaration.
 
 Nothing is inferred and nothing is invented: if the app is reachable but has no route table of its
 own (`no-route-table`, e.g. the dashboard itself), answers non-JSON (`routes-not-json`), does not
-declare its prefix (`entry-not-declared`) or does not answer at all (`routes-unreachable`), the
-row's `link` stays `null` — the block never falls back to a guessed path — and the page shows the
-bare prefix as plain text with that reason in its tooltip.
+declare its prefix (`entry-not-declared`) or does not answer at all (`routes-unreachable`) **and** the
+route declares no `entry` of its own, the row's `link` stays `null` — the block never falls back to a
+guessed path — and the page shows the bare prefix as plain text with that reason in its tooltip.
+
+## UI components (`static/`)
+
+No build step and no CDN (`data-cfasync="false"` opts out of Cloudflare Rocket Loader). A cell that
+shows the same kind of information as another cell goes through the **same component** in `app.js`'s
+`ui` namespace, so one fact can never appear in two vocabularies:
+
+* `ui.chip(text, {tone, title})` — the small pill for a single attribute value;
+* `ui.schedule(s)` — a watcher's period, from the API's structured `schedule`
+  (`{kind, every_seconds, raw, display}`): a cron job and an interval job both end up saying the same
+  thing (`every 5 min`), with their own expression in the tooltip; a schedule that cannot be read as
+  an interval keeps its original wording (`tone: "dim"`) instead of being given an invented period;
+* `ui.status(value)` — a watcher's last outcome.
+
+Explaining a panel belongs in this README, not in prose on the page: the UI shows data, this file
+says what it means and where it comes from.
 
 ## File browser (read-only)
 

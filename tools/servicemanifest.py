@@ -33,7 +33,8 @@ import sys
 SCHEMA_NOTE = (
     "services.json owns: services (script/port|listen/health/log), the gateway's routes, "
     "and per-service settings. A proxy route may set \"websocket\": true to carry websocket "
-    "upgrades on that prefix. config.yaml owns credentials/identity/LLM. "
+    "upgrades on that prefix, and \"entry\": \"/prefix/\" to declare the front door of an app "
+    "that cannot declare it itself. config.yaml owns credentials/identity/LLM. "
     "Top-level keys starting with '_' are comments and are ignored."
 )
 ROUTE_TYPES = ("static", "proxy")
@@ -171,6 +172,12 @@ def problems(manifest: dict) -> list[str]:
                 found.append("%s: 'websocket' must be true or false" % where)
             elif route.get("websocket") and kind != "proxy":
                 found.append("%s: 'websocket' only applies to a proxy route" % where)
+            if "entry" in route:
+                entry_path = route.get("entry")
+                if (not isinstance(entry_path, str) or not entry_path.endswith("/")
+                        or (isinstance(prefix, str) and not entry_path.startswith(prefix))):
+                    found.append("%s: 'entry' must be a path under the route's own prefix ending in '/' "
+                                 "(the front door of the app behind a route that cannot declare it itself)" % where)
     return found
 
 

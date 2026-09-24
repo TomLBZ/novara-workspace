@@ -139,6 +139,7 @@ def _alive(pid: int) -> bool:
 
 ENTRY_FROM_SERVICE = "service:/api/routes"
 ENTRY_FROM_MANIFEST = "manifest:gateway.routes.prefix"
+ENTRY_FROM_ROUTE = "manifest:gateway.routes.entry"
 
 
 def port_open(port, timeout: float = 1.0) -> bool:
@@ -150,37 +151,43 @@ def port_open(port, timeout: float = 1.0) -> bool:
         return False
 
 
-def entry_via_service(m: dict, service, prefix: str, timeout: float = 2.0):
-    """一条网关路由的**唯一入口路径**。
+def entry_via_service(m: dict, service, prefix: str, declared=None, timeout: float = 2.0):
+    """一条网关路由的**唯一入口路径**（声明优先级见 README「Services vs. projects & routes」）。
 
-    声明方式只有一个（见 README「Services vs. projects & routes」）：服务自己声明的
-    `GET <prefix>/api/routes` 里**第一个 `path` 以 `/` 结尾且等于前缀本尊**的路由
-    （`/quotagent` → `/quotagent/`）。返回 `(entry, entry_source)`。
+    1. **服务自己声明**：`GET <prefix>/api/routes` 里**第一个 `path` 以 `/` 结尾且等于前缀本尊**
+       的路由（`/quotagent` → `/quotagent/`）；
+    2. **路由自己声明**：`gateway.routes[].entry` —— 给**问不出入口的服务**用（例：`/vscode`
+       后面的 code-server 是第三方 app，不会答 `<prefix>/api/routes`；它的前门是路由知道的事实）；
+    3. **路由后面没有服务**（static）：路由器自己的前缀就是唯一声明。
 
     子页面（`/quotagent/start/` …）与 `/api/*` 路由**故意不读进这一层**：一个 app 的子页面是
-    它自己的责任，入口只声明入口。拿不到就返回 `(None, 原因)`，原因如实写进 `entry_source`，
+    它自己的责任，入口只声明入口。全都拿不到就返回 `(None, 原因)`，原因如实写进 `entry_source`，
     不猜也不编（这层里没有任何"从子路由反推入口"的逻辑）：
 
-      * `no-route-table`   —— 服务活着，但它在 `<prefix>/api/routes` 上没有自述路由表（如 dashboard 自己）；
+      * `no-route-table`   —— 服务活着，但它在 `<prefix>/api/routes` 上没有自述路由表；
       * `routes-not-json`  —— 有应答但不是 JSON；
       * `entry-not-declared` —— 路由表里没有"等于前缀本尊"的那一条；
       * `routes-unreachable` —— 该服务的端口上没有任何应答。
     """
     prefix = str(prefix or "/")
+    reason = ""
     if service:
         spec = (m.get(service) or {}) if isinstance(m, dict) else {}
         for port in sm.ports(spec):
             ok, body = probe(port, prefix.rstrip("/") + "/api/routes", timeout)
             if not ok:
                 if port_open(port):
-                    return None, "no-route-table"
+                    reason = "no-route-table"
+                    break
                 continue
             try:
                 data = json.loads(body)
             except Exception:
-                return None, "routes-not-json"
+                reason = "routes-not-json"
+                break
             if not isinstance(data, dict):
-                return None, "routes-not-json"
+                reason = "routes-not-json"
+                break
             for route in data.get("routes") or []:
                 if not isinstance(route, dict):
                     continue
@@ -189,8 +196,14 @@ def entry_via_service(m: dict, service, prefix: str, timeout: float = 2.0):
                     continue
                 if path.endswith("/") and path.rstrip("/") == prefix.rstrip("/"):
                     return path, ENTRY_FROM_SERVICE
-            return None, "entry-not-declared"
-        return None, "routes-unreachable"
+            reason = "entry-not-declared"
+            break
+        else:
+            reason = "routes-unreachable"
+    if declared:
+        return str(declared), ENTRY_FROM_ROUTE
+    if service:
+        return None, reason or "routes-unreachable"
     # 路由后面没有服务（如 static）：没有任何服务可问，路由器自己的前缀就是唯一声明。
     return (prefix if prefix.endswith("/") else prefix + "/"), ENTRY_FROM_MANIFEST
 
@@ -210,7 +223,7 @@ def collect_routes() -> list:
     rows = []
     for r in routes:
         prefix = r.get("prefix", "/")
-        link, source = entry_via_service(m, r.get("service"), prefix)
+        link, source = entry_via_service(m, r.get("service"), prefix, r.get("entry"))
         rows.append({
             "prefix": prefix,
             "type": r.get("type"),
@@ -251,21 +264,81 @@ def collect_system() -> dict:
     }
 
 
+SCHEDULE_UNIT_SECONDS = (("d", 86400), ("h", 3600), ("min", 60), ("s", 1))
+
+
+def every_label(seconds: int) -> str:
+    """周期说法的**唯一**出处：UI 上每一行的 schedule 都长这样（`every 15 min`）。"""
+    for unit, size in SCHEDULE_UNIT_SECONDS:
+        if seconds % size == 0 and (size == 1 or seconds >= size):
+            return "every %d %s" % (seconds // size, unit)
+    return "every %d s" % seconds
+
+
+def cron_period_seconds(expr: str):
+    """cron 表达式 → 周期秒数；只有**等间隔**的表达式答得出来（`* * * * *`、`*/5 * * * *`）。
+
+    识别不了（如 `0 9 * * 1-5`）就返回 None：宁可让 UI 显示原始表达式，也不编一个假周期。
+    """
+    fields = str(expr or "").split()
+    if len(fields) != 5 or fields[1:] != ["*"] * 4:
+        return None
+    minute = fields[0]
+    if minute == "*":
+        return 60
+    if minute.startswith("*/") and minute[2:].isdigit() and int(minute[2:]) > 0:
+        return int(minute[2:]) * 60
+    if minute.isdigit():                     # `0 * * * *` = 每小时整点
+        return 3600
+    return None
+
+
+def schedule_info(raw, shown=None) -> dict:
+    """watcher 的 schedule 归一化成**同一个结构**，不管它原本是 cron 还是固定间隔。
+
+    这就是"统一展示"的落点：UI 侧只有一个 schedule 组件读这个结构，所以两种来源在页面上
+    必然是同一种说法。真识别不出周期时 `every_seconds` 为 None、`display` 用作业自己的说法
+    （如实，不编）。
+    """
+    kind, expr, seconds = "", "", None
+    if isinstance(raw, dict):
+        kind = str(raw.get("kind") or "")
+        if kind == "cron":
+            expr = str(raw.get("expr") or "")
+            seconds = cron_period_seconds(expr)
+        elif kind == "interval":
+            expr = str(raw.get("display") or "")
+            for key, size in (("days", 86400), ("hours", 3600), ("minutes", 60), ("seconds", 1)):
+                value = raw.get(key)
+                if isinstance(value, (int, float)) and value > 0:
+                    seconds = int(value * size)
+                    break
+    elif isinstance(raw, str) and raw.strip():
+        kind, expr = "cron", raw.strip()
+        seconds = cron_period_seconds(expr)
+    return {
+        "kind": kind or "unknown",
+        "every_seconds": seconds,
+        "raw": expr or str(shown or ""),
+        "display": every_label(seconds) if seconds else str(shown or expr or "—"),
+    }
+
+
 def collect_watchers() -> list:
     home = pathlib.Path(os.environ.get("HERMES_HOME", "/opt/data"))
     store = read_json(home / "cron" / "jobs.json") or {}
     rows = []
     for job in store.get("jobs", []):
-        sched = job.get("schedule_display")
         raw = job.get("schedule")
-        if not sched:
-            sched = (raw.get("display") or raw.get("expr")) if isinstance(raw, dict) else raw
+        shown = job.get("schedule_display")
+        if not shown:
+            shown = (raw.get("display") or raw.get("expr")) if isinstance(raw, dict) else raw
         last = job.get("last_run_at") or ""
         if "T" in last:                      # 2026-09-11T21:52:20.176289+00:00 -> 21:52:20Z
             last = last.split("T", 1)[1][:8] + "Z"
         rows.append({
             "name": job.get("name") or job.get("id"),
-            "schedule": sched or "—",
+            "schedule": schedule_info(raw, shown),
             "last_run_at": last or "—",
             "last_status": job.get("last_status") or "pending",
             "enabled": job.get("enabled", True),
