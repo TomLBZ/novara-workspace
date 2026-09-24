@@ -317,6 +317,20 @@ print(("ok:" + state) if ok else "MISMATCH:%s" % json.dumps(body))
     else
       wrn "services/gateway/tests missing - proxying and websocket upgrades are unverified"
     fi
+
+    if [ -x "$WS_ROOT/runtime/code-server/current/bin/code-server" ] \
+       && [ -f "$WS_ROOT/services/vscode/tests/test_service.py" ]; then
+      local vs_out vs_rc
+      vs_out="$(cd "$WS_ROOT" && python3 "services/vscode/tests/test_service.py" 2>&1)"; vs_rc=$?
+      if [ "$vs_rc" -eq 0 ]; then
+        ok "vscode test_service.py: $(printf '%s' "$vs_out" | grep -c '^PASS') checks passed"
+      else
+        bad "vscode test_service.py failed (rc=$vs_rc)"
+        printf '%s\n' "$vs_out" | grep -E 'FAIL|Traceback|Error|SKIP' | sed 's/^/      /' | head -8
+      fi
+    else
+      wrn "code-server not installed (tools/bootstrap.sh) - the ws-vscode route is unverified"
+    fi
   else
     wrn "tools/servicemanifest.py missing - service manifest is not centralised"
   fi

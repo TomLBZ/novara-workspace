@@ -309,19 +309,26 @@ class Ws:
 
 
 class Gateway:
-    """`gateway.py` running on a scratch manifest, on a fresh loopback port."""
+    """`gateway.py` running on a scratch manifest, on a fresh loopback port.
 
-    def __init__(self, tmp: pathlib.Path, routes: list[dict]) -> None:
+    `services` adds further manifest entries (a test that routes through a real service
+    needs them in the same scratch file, so the live one stays untouched).
+    """
+
+    def __init__(self, tmp: pathlib.Path, routes: list[dict], services: dict | None = None,
+                 port: int | None = None) -> None:
         self.tmp = tmp
         self.tmp.mkdir(parents=True, exist_ok=True)
-        self.port = free_port()
+        self.port = port or free_port()
         self.manifest = self.tmp / "services-test.json"
         self.log = self.tmp / "gateway-test.log"
-        self.manifest.write_text(json.dumps({
-            "_about": "scratch manifest for services/gateway/tests (never the live one)",
+        manifest = {
+            "_about": "scratch manifest for service tests (never the live one)",
             "gateway": {"script": "services/gateway/gateway.py", "listen": [self.port],
                         "health": "/healthz", "log": str(self.log), "routes": routes},
-        }, indent=2))
+        }
+        manifest.update(services or {})
+        self.manifest.write_text(json.dumps(manifest, indent=2))
         self.proc: subprocess.Popen | None = None
 
     def __enter__(self) -> "Gateway":
