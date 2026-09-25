@@ -350,7 +350,8 @@ to either one. Route matching is longest-prefix; `strip_prefix` decides whether 
 removed before forwarding. A proxy route adds `"websocket": true` to carry WebSocket upgrades on its
 prefix; without it an upgrade request on that prefix is refused with `400`. It may also declare
 `"entry": "/prefix/"` — the clickable front door the dashboard shows for that route, for an app that
-cannot declare one itself (code-server, a vendored third-party binary, has no route table to ask) —
+cannot declare one itself (code-server, a vendored third-party binary, has no route table to ask;
+`/quotagent` declares it here too, its product WebUI serves no `/api/routes`) —
 and `"no_transform": true`, which makes the router send `Cache-Control: no-transform` so an
 intermediate CDN cannot rewrite that app's responses (see the Rocket Loader note below).
 The table lives in the manifest (`services.json` → `gateway.routes`), so after editing it run

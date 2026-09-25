@@ -19,7 +19,8 @@
         "prefix": "/quotagent",
         "type": "proxy",
         "service": "quotagent",
-        "note": "quotagent 双方视角（承包商 / 供应商）"
+        "entry": "/quotagent/",
+        "note": "quotagent 双方视角（承包商 / 供应商）；entry 声明在路由上——产品 WebUI（host/product.mjs）不答 /api/routes 路由表"
       },
       {
         "prefix": "/vscode",

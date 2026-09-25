@@ -35,13 +35,14 @@ Two different things, deliberately kept apart — and both are **minimal by rule
 order:
 
 1. the app behind the route declares it itself — the **first** route in its
-   `GET <prefix>/api/routes` whose `path` ends in `/` and equals the prefix itself
-   (`/quotagent` → `/quotagent/`, from `quotagent-webui`'s own route table). Only that one route is
-   read; the rest of that table (sub-pages, `/api/*`) is never pulled into this layer;
-2. the route declares it itself — `gateway.routes[].entry` (`/vscode` → `/vscode/`). This is for an
-   app that cannot answer a route table at all: `/vscode` is code-server, a vendored third-party
-   binary behind a supervisor (`services/vscode/vscode.py`), so its front door is a fact the *route*
-   knows rather than something this layer could infer;
+   `GET <prefix>/api/routes` whose `path` ends in `/` and equals the prefix itself. Only that one
+   route is read; the rest of that table (sub-pages, `/api/*`) is never pulled into this layer;
+2. the route declares it itself — `gateway.routes[].entry` (`/quotagent` → `/quotagent/`,
+   `/vscode` → `/vscode/`). This is for an app that cannot answer a route table at all: `/vscode` is
+   code-server, a vendored third-party binary behind a supervisor (`services/vscode/vscode.py`), and
+   the quotagent product WebUI (`host/product.mjs`, `/workspace/projects/quotagent`) serves its own
+   app without a `/api/routes` table — so their front door is a fact the *route* knows rather than
+   something this layer could infer;
 3. a route with **no service behind it** (e.g. the `static` route `/projects/hello`) has nothing to
    ask, so the router's own `gateway.routes.prefix` is the only declaration.
 
